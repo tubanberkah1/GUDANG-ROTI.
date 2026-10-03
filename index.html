@@ -180,23 +180,23 @@ async function loadAll(){
   items=items__tmp; trx=trx__tmp; produksi=produksi__tmp; packing=packing__tmp; penjualan=penjualan__tmp; opname=opname__tmp; retur=retur__tmp; riwayatEdit=riwayatEdit__tmp;
 }
 async function save(key, val){
+  // 1. Simpan di memori HP dulu sebagai cadangan mutlak agar tidak pernah hilang
+  localStorage.setItem('roti_' + key, JSON.stringify(val));
+  window[key] = val;
+
+  // 2. Kirim ke Supabase dengan metode UPSERT (Aman, TIDAK MENGHAPUS data lama)
   try{
-    // sinkron penuh: hapus semua baris tabel ini, lalu simpan ulang isi array saat ini
-    const { error: delErr } = await sb.from(key).delete().neq('id','__never_matches__');
-    if(delErr) throw delErr;
-    if(val.length>0){
-      const rows = val.map(rec=>({id: rec.id, data: rec}));
-      const { error: insErr } = await sb.from(key).insert(rows);
-      if(insErr) throw insErr;
+    if(val.length > 0){
+      const rows = val.map(rec => ({ id: rec.id, data: rec }));
+      const { error } = await sb.from(key).upsert(rows, { onConflict: 'id' });
+      if(error) throw error;
     }
     dbStatus = 'online';
-    updateDbStatusBadge();
-  }catch(e){
-    console.error('Gagal menyimpan', key, e);
+  } catch(e) {
+    console.error('Gagal simpan online:', key, e);
     dbStatus = 'offline';
-    updateDbStatusBadge();
-    alert('Gagal menyimpan ke database online. Cek koneksi internet, lalu coba lagi. Perubahan barusan mungkin belum tersimpan.');
   }
+  updateDbStatusBadge();
 }
 function updateDbStatusBadge(){
   const el = document.getElementById('db-status');
