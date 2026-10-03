@@ -3322,7 +3322,113 @@ function attachHandlers(){
   };
 })();
 
-(async function init(){
+// ===== PERBAIKAN SINKRONISASI (menggantikan loadAll, save, importExcel lama) =====
+const lastSynced = {};
+const dbReady = {};
+
+async function ambilSemuaBaris(k){
+  const out = [];
+  const step = 1000;
+  for(let from = 0; ; from += step){
+    const { data, error } = await sb.from(k).select('data')
+      .order('created_at', {ascending:true}).order('id', {ascending:true})
+      .range(from, from + step - 1);
+    if(error) throw error;
+    out.push(...(data||[]).map(r=>r.data));
+    if(!data || data.length < step) break;
+  }
+  return out;
+}
+
+loadAll = async function(){
+  let semuaOk = true;
+  const hasil = {};
+  for(const k of DATASETS_DB){
+    try{ hasil[k] = await ambilSemuaBaris(k); }
+    catch(e){ console.error('Gagal memuat', k, e); semuaOk = false; }
+  }
+  for(const k in hasil){
+    lastSynced[k] = new Map(hasil[k].map(r=>[r.id, JSON.stringify(r)]));
+    dbReady[k] = true;
+  }
+  if(hasil.items) items = hasil.items;
+  if(hasil.trx) trx = hasil.trx;
+  if(hasil.produksi) produksi = hasil.produksi;
+  if(hasil.packing) packing = hasil.packing;
+  if(hasil.penjualan) penjualan = hasil.penjualan;
+  if(hasil.opname) opname = hasil.opname;
+  if(hasil.retur) retur = hasil.retur;
+  if(hasil.riwayatEdit) riwayatEdit = hasil.riwayatEdit;
+  dbStatus = semuaOk ? 'online' : 'offline';
+};
+
+save = async function(key, val){
+  if(!dbReady[key]){
+    alert('Data belum berhasil dimuat dari database, jadi penyimpanan DIBATALKAN supaya data lama tidak tertimpa. Klik tombol Refresh lalu coba lagi.');
+    return;
+  }
+  try{
+    const lama = lastSynced[key] || new Map();
+    const baru = new Map(val.map(r=>[r.id, JSON.stringify(r)]));
+    const ubah = val.filter(r => lama.get(r.id) !== baru.get(r.id));
+    const hapus = [...lama.keys()].filter(id => !baru.has(id));
+    for(let i=0; i<ubah.length; i+=200){
+      const rows = ubah.slice(i, i+200).map(rec=>({id: rec.id, data: rec}));
+      const { error } = await sb.from(key).upsert(rows, {onConflict:'id'});
+      if(error) throw error;
+    }
+    for(let i=0; i<hapus.length; i+=100){
+      const { error } = await sb.from(key).delete().in('id', hapus.slice(i, i+100));
+      if(error) throw error;
+    }
+    lastSynced[key] = baru;
+    dbStatus = 'online';
+    updateDbStatusBadge();
+  }catch(e){
+    console.error('Gagal menyimpan', key, e);
+    dbStatus = 'offline';
+    updateDbStatusBadge();
+    alert('Gagal menyimpan ke database online. Cek koneksi internet, lalu coba lagi. Perubahan barusan mungkin belum tersimpan.');
+  }
+};
+
+importExcel = function(file){
+  const status = document.getElementById('import-status');
+  const reader = new FileReader();
+  reader.onload = async (e)=>{
+    try{
+      const wb = XLSX.read(e.target.result, {type:'array'});
+      const dataMap = {};
+      DATASETS_EXCEL.forEach(name=>{
+        if(!wb.SheetNames.includes(name)) return;
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], {defval:''});
+        dataMap[name] = rows.map(unflattenRecordFromExcel).filter(r=> r.id);
+      });
+      if(Object.keys(dataMap).length===0){
+        if(status) status.textContent = 'File tidak dikenali (bukan hasil Export Excel dari aplikasi ini).';
+        return;
+      }
+      if(!confirm('Data yang ada sekarang akan DIGANTI dengan isi file ini. Lanjutkan?')) return;
+      const setters = {
+        items:v=>{items=v}, trx:v=>{trx=v}, produksi:v=>{produksi=v}, packing:v=>{packing=v},
+        penjualan:v=>{penjualan=v}, opname:v=>{opname=v}, retur:v=>{retur=v}, riwayatEdit:v=>{riwayatEdit=v}
+      };
+      for(const name of DATASETS_EXCEL){
+        if(!(name in dataMap)) continue;
+        setters[name](dataMap[name]);
+        await save(name, dataMap[name]);
+      }
+      if(status) status.textContent = 'Data berhasil diimpor.';
+      renderAll();
+    }catch(err){
+      console.error(err);
+      if(status) status.textContent = 'Gagal membaca file Excel.';
+    }
+  };
+  reader.readAsArrayBuffer(file);
+};
+// ===== AKHIR PERBAIKAN =====
+  (async function init(){
   await loadAll();
   updateDbStatusBadge();
   renderAll();
