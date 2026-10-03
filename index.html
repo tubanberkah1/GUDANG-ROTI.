@@ -3428,6 +3428,22 @@ importExcel = function(file){
   reader.readAsArrayBuffer(file);
 };
 // ===== AKHIR PERBAIKAN =====
+ // ===== DIAGNOSA KONEKSI =====
+let sudahDiagnosa = false;
+const _loadAllBaru = loadAll;
+loadAll = async function(){
+  await _loadAllBaru();
+  if(dbStatus==='offline' && !sudahDiagnosa){
+    sudahDiagnosa = true;
+    const pesan = [];
+    for(const k of DATASETS_DB){
+      const { count, error } = await sb.from(k).select('id', {count:'exact', head:true});
+      pesan.push(k + ': ' + (error ? 'ERROR - ' + (error.message || error.code || JSON.stringify(error)) : count + ' baris'));
+    }
+    alert('DIAGNOSA KONEKSI:\n\n' + pesan.join('\n'));
+  }
+};
+// ===== AKHIR DIAGNOSA =====
   (async function init(){
   await loadAll();
   updateDbStatusBadge();
