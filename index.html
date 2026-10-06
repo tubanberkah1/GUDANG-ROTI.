@@ -4071,3 +4071,71 @@ subscribeRealtime = function(){
   setTimeout(function(){ t.remove(); }, 6000);
 })();
 </script>
+<script>
+// =====================================================================
+// KATEGORI "NON BAHAN" - versi mandiri (tidak butuh kode tambahan lain)
+// =====================================================================
+(function(){
+  function tanda(teks, hijau){
+    var t = document.createElement('div');
+    t.textContent = teks;
+    t.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);max-width:90%;'
+      + 'background:'+(hijau?'#2e6e62':'#b4442e')+';color:#fff;padding:10px 16px;border-radius:8px;'
+      + 'font-size:13px;font-weight:600;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,.25);';
+    document.body.appendChild(t);
+    setTimeout(function(){ t.remove(); }, hijau ? 6000 : 20000);
+  }
+
+  try{
+    // 1. Daftarkan kategori (nama internal "lainnya" dipertahankan supaya data lama aman)
+    KATEGORI.lainnya = { label:'Non Bahan', hasHasil:false };
+
+    // 2. Warna label di tabel
+    var st = document.createElement('style');
+    st.textContent = '.tag.lainnya{background:rgb(225,232,241);color:rgb(46,92,138);}';
+    document.head.appendChild(st);
+
+    // 3. Kode otomatis NBH001, NBH002, ...
+    nextKode = function(kategori){
+      var pfx = {premix:'PMX', bahan:'BHN', kardus:'KRD', lainnya:'NBH'}[kategori] || 'BRG';
+      var maks = 0, jumlah = 0;
+      items.forEach(function(i){
+        if(i.kategori===kategori){
+          jumlah++;
+          var m = String(i.kode||'').match(/(\d+)$/);
+          if(m) maks = Math.max(maks, parseInt(m[1],10));
+        }
+      });
+      return pfx + String(Math.max(maks, jumlah)+1).padStart(3,'0');
+    };
+
+    // 4. Boleh muncul di tab Keluar (kalau kode tab Keluar sudah terpasang)
+    if(typeof KELUAR_KAT_PATCH!=='undefined' && KELUAR_KAT_PATCH.indexOf('lainnya')<0){
+      KELUAR_KAT_PATCH.push('lainnya');
+    }
+
+    // 5. Pasang pilihan "Non Bahan" ke kolom Kategori. Dicek terus supaya tidak hilang.
+    function pasang(){
+      var sel = document.getElementById('item-kategori');
+      if(sel && !sel.querySelector('option[value="lainnya"]')){
+        var o = document.createElement('option');
+        o.value = 'lainnya';
+        o.textContent = 'Non Bahan';
+        sel.appendChild(o);
+      }
+      var cari = document.getElementById('cari-kat');
+      if(cari){
+        var oc = cari.querySelector('option[value="lainnya"]');
+        if(!oc){ oc = document.createElement('option'); oc.value = 'lainnya'; cari.appendChild(oc); }
+        oc.textContent = 'Non Bahan';
+      }
+    }
+    setInterval(pasang, 500);
+    pasang();
+
+    tanda('✅ Non Bahan aktif. Buka tab Kode > kolom Kategori', true);
+  }catch(e){
+    tanda('❌ Kode Non Bahan gagal: '+e.message, false);
+  }
+})();
+</script>
