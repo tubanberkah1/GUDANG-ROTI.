@@ -4139,3 +4139,113 @@ subscribeRealtime = function(){
   }
 })();
 </script>
+<script>
+// =====================================================================
+// ARUS PER CV / SUPPLIER (kartu baru di bawah tab Arus)
+// Pilih CV, atur tanggal, lihat Masuk / Keluar / Selisih per barang.
+// Hanya membaca data yang ada. Tidak mengubah data apa pun.
+// =====================================================================
+(function(){
+  var state = { cv:'', dari:'', sampai:'' };   // cv: '' = semua, '__none__' = tanpa CV
+
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function daftarCv(){
+    var set = {};
+    SUPPLIERS.forEach(function(s){ set[s]=1; });
+    trx.forEach(function(t){ if(t.supplier) set[t.supplier]=1; });
+    return Object.keys(set);
+  }
+
+  function isiTabel(){
+    var body = document.getElementById('arus-cv-body');
+    var ringkas = document.getElementById('arus-cv-ringkas');
+    if(!body) return;
+
+    var rows = {};
+    trx.forEach(function(t){
+      if(state.dari && t.tanggal < state.dari) return;
+      if(state.sampai && t.tanggal > state.sampai) return;
+      var sup = t.supplier || '';
+      if(state.cv==='__none__'){ if(sup) return; }
+      else if(state.cv){ if(sup !== state.cv) return; }
+      var r = rows[t.itemId] || (rows[t.itemId] = {masuk:0, keluar:0});
+      if(t.tipe==='masuk') r.masuk += t.qty; else r.keluar += t.qty;
+    });
+
+    var daftar = items.filter(function(it){ return rows[it.id]; })
+                      .sort(function(a,b){ return a.kode.localeCompare(b.kode); });
+    var totalMasuk = 0, totalKeluar = 0;
+    var html = daftar.map(function(it, idx){
+      var r = rows[it.id];
+      var selisih = r.masuk - r.keluar;
+      totalMasuk += r.masuk * it.harga;
+      totalKeluar += r.keluar * it.harga;
+      return '<tr>'
+        + '<td>'+(idx+1)+'</td>'
+        + '<td><span class="kode-badge">'+esc(it.kode)+'</span></td>'
+        + '<td>'+esc(it.nama)+'</td>'
+        + '<td>'+r.masuk.toLocaleString('id-ID')+' '+esc(it.satuan)+'</td>'
+        + '<td>'+r.keluar.toLocaleString('id-ID')+' '+esc(it.satuan)+'</td>'
+        + '<td class="'+(selisih<0?'sisa-low':'sisa-ok')+'">'+selisih.toLocaleString('id-ID')+' '+esc(it.satuan)+'</td>'
+        + '<td>'+rupiah(r.masuk*it.harga)+'</td>'
+        + '</tr>';
+    }).join('');
+
+    body.innerHTML = html || '<tr><td colspan="7" class="empty">Tidak ada transaksi untuk pilihan ini</td></tr>';
+    if(ringkas){
+      ringkas.innerHTML =
+        '<div class="stat"><div class="label">Jumlah Barang</div><div class="value">'+daftar.length+'</div></div>'
+      + '<div class="stat"><div class="label">Total Nilai Masuk</div><div class="value">'+rupiah(totalMasuk)+'</div></div>'
+      + '<div class="stat"><div class="label">Total Nilai Keluar</div><div class="value">'+rupiah(totalKeluar)+'</div></div>';
+    }
+  }
+
+  function bangunKartu(){
+    var main = document.getElementById('main');
+    if(!main || activeTab!=='arus' || document.getElementById('arus-cv-card')) return;
+
+    var opsi = '<option value="">Semua CV</option><option value="__none__">Tanpa CV</option>'
+      + daftarCv().map(function(s){ return '<option value="'+esc(s)+'">'+esc(s)+'</option>'; }).join('');
+
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.id = 'arus-cv-card';
+    card.innerHTML =
+      '<h2>Arus per CV / Supplier</h2>'
+    + '<div class="sub">Masuk = pembelian dari CV (tab Masuk). Keluar hanya terhitung ke CV kalau CV-nya diisi di tab Keluar. '
+    + 'Pemakaian dari Produksi, Packing, Opname, dan Retur tidak punya CV, jadi masuk ke "Tanpa CV". '
+    + 'Karena itu Selisih per CV adalah angka menurut catatan CV, bukan sisa stok fisik. Sisa stok yang benar tetap di tabel Arus di atas.</div>'
+    + '<form class="inline" onsubmit="return false;">'
+    +   '<div class="field"><label>CV / Supplier</label><select id="arus-cv-pilih">'+opsi+'</select></div>'
+    +   '<div class="field"><label>Dari Tanggal</label><input type="date" id="arus-cv-dari"></div>'
+    +   '<div class="field"><label>Sampai Tanggal</label><input type="date" id="arus-cv-sampai"></div>'
+    + '</form>'
+    + '<div class="grid" id="arus-cv-ringkas" style="margin-top:10px;"></div>'
+    + '<table><thead><tr><th>No</th><th>Kode</th><th>Barang</th><th>Masuk</th><th>Keluar</th><th>Selisih (Masuk − Keluar)</th><th>Nilai Masuk</th></tr></thead>'
+    + '<tbody id="arus-cv-body"></tbody></table>';
+    main.appendChild(card);
+
+    var sel = document.getElementById('arus-cv-pilih');
+    var dari = document.getElementById('arus-cv-dari');
+    var sampai = document.getElementById('arus-cv-sampai');
+    sel.value = state.cv; dari.value = state.dari; sampai.value = state.sampai;
+    sel.addEventListener('change', function(){ state.cv = sel.value; isiTabel(); });
+    dari.addEventListener('change', function(){ state.dari = dari.value; isiTabel(); });
+    sampai.addEventListener('change', function(){ state.sampai = sampai.value; isiTabel(); });
+    isiTabel();
+  }
+
+  var main = document.getElementById('main');
+  if(main){
+    new MutationObserver(bangunKartu).observe(main, { childList:true, subtree:true });
+  }
+  bangunKartu();
+
+  var t = document.createElement('div');
+  t.textContent = '✅ Arus per CV aktif (lihat di bawah tab Arus)';
+  t.style.cssText = 'position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#2e6e62;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;font-weight:600;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,.25);';
+  document.body.appendChild(t);
+  setTimeout(function(){ t.remove(); }, 5000);
+})();
+</script>
