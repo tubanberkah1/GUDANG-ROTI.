@@ -3946,25 +3946,26 @@ subscribeRealtime = function(){
 })();
 </script>
 <script>
+<script>
 // =====================================================================
-// KATEGORI BARU "LAINNYA" (non-bahan) di tab Kode
-// - muncul di pilihan Kategori saat Tambah Kode Barang
-// - kode otomatis LNN001, LNN002, dst
-// - muncul juga di tab Keluar (input ketik), Arus, Opname, Laporan, Dashboard
+// KATEGORI "NON BAHAN" (menggantikan nama "Lainnya")
+// - nama tampil: Non Bahan
+// - kode barang baru otomatis: NBH001, NBH002, dst
+// - muncul di pilihan Kategori tab Kode, tab Keluar, pencarian, dan semua laporan
 // Tidak mengubah struktur data / koneksi Supabase.
 // =====================================================================
 (function(){
-  // 1. Daftarkan kategori baru
-  KATEGORI.lainnya = { label:'Lainnya', hasHasil:false };
+  // 1. Nama kategori. Nama internal tetap "lainnya" supaya barang lama tidak terpengaruh.
+  KATEGORI.lainnya = { label:'Non Bahan', hasHasil:false };
 
-  // 2. Warna label kategori
+  // 2. Warna label
   var st = document.createElement('style');
   st.textContent = '.tag.lainnya{background:rgb(225,232,241);color:rgb(46,92,138);}';
   document.head.appendChild(st);
 
-  // 3. Kode otomatis (LNN001, ...) - pakai nomor terbesar yang ada supaya tidak kembar
+  // 3. Kode otomatis NBH001, NBH002, ... (nomor terus lanjut, tidak kembar)
   nextKode = function(kategori){
-    var pfx = {premix:'PMX', bahan:'BHN', kardus:'KRD', lainnya:'LNN'}[kategori] || 'BRG';
+    var pfx = {premix:'PMX', bahan:'BHN', kardus:'KRD', lainnya:'NBH'}[kategori] || 'BRG';
     var maks = 0, jumlah = 0;
     items.forEach(function(i){
       if(i.kategori===kategori){
@@ -3976,22 +3977,29 @@ subscribeRealtime = function(){
     return pfx + String(Math.max(maks, jumlah)+1).padStart(3,'0');
   };
 
-  // 4. Tambahkan pilihan "Lainnya" di form Tambah Kode Barang
+  // 4. Pilihan "Non Bahan" di form Tambah Kode Barang (tab Kode)
   var _viewKodeAsli = viewKode;
   viewKode = function(){
     var html = _viewKodeAsli();
-    return html.replace(
-      '<option value="kardus">Kardus</option>',
-      '<option value="kardus">Kardus</option><option value="lainnya">Lainnya (non-bahan)</option>'
-    );
+    html = html.replace('Lainnya (non-bahan)', 'Non Bahan');
+    if(html.indexOf('value="lainnya"') < 0){
+      html = html.replace(
+        '<option value="kardus">Kardus</option>',
+        '<option value="kardus">Kardus</option><option value="lainnya">Non Bahan</option>'
+      );
+    }
+    return html;
   };
 
-  // 5. Barang "Lainnya" ikut muncul di input ketik tab Keluar
+  // 5. Muncul di input ketik tab Keluar
   if(typeof KELUAR_KAT_PATCH!=='undefined' && KELUAR_KAT_PATCH.indexOf('lainnya')<0){
     KELUAR_KAT_PATCH.push('lainnya');
   }
 
-  // Segarkan tampilan
+  // 6. Ganti nama di pilihan kategori kotak Cari (kalau kotak Cari sudah terpasang)
+  var opt = document.querySelector('#cari-kat option[value="lainnya"]');
+  if(opt) opt.textContent = 'Non Bahan';
+
   if(typeof renderAll==='function') renderAll();
 })();
 </script>
