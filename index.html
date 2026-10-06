@@ -3499,4 +3499,249 @@ window.delOpname = async function(id) {
     }
 };
 </script>
-    
+<script>
+// =====================================================================
+// PERBAIKAN TAB KELUAR (input bahan bisa diketik) + ANTI-RESET REALTIME
+// Tempel di paling bawah index.html. Tidak mengubah struktur data / Supabase.
+// =====================================================================
+
+// Kategori yang muncul di tab Keluar. Kalau bahan tidak muncul, ubah di sini,
+// misal: ['bahan','kardus','premix']  (hati-hati: bisa jadi dobel potong stok)
+var KELUAR_KAT_PATCH = ['bahan'];
+// Pilihan barang di tab Keluar (tidak hilang saat renderAll)
+var keluarPilihId = null;
+
+function labelBarang(it){ return it.kode+' - '+it.nama+' ('+it.satuan+')'; }
+function escAttr(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function daftarBahanKeluar(){
+  return items.filter(function(i){ return KELUAR_KAT_PATCH.indexOf(i.kategori)>=0; });
+}
+function cariBahanKeluar(teks){
+  var t = (teks||'').trim().toLowerCase();
+  if(!t) return null;
+  var daftar = daftarBahanKeluar();
+  return daftar.find(function(i){ return labelBarang(i).toLowerCase()===t; })
+      || daftar.find(function(i){ return i.kode.toLowerCase()===t; })
+      || null;
+}
+function pilihBahanKeluar(el){
+  var it = cariBahanKeluar(el.value);
+  var hidden = document.getElementById('keluar-item-id');
+  keluarPilihId = it ? it.id : null;
+  if(hidden) hidden.value = it ? it.id : '';
+  el.setCustomValidity((it || el.value.trim()==='') ? '' : 'Pilih bahan dari daftar yang muncul');
+}
+function bahanKeluarFokus(el){
+  // kosongkan teks supaya SEMUA bahan muncul di daftar; teks lama disimpan dulu
+  el.dataset.lama = el.value;
+  el.value = '';
+}
+function bahanKeluarBlur(el){
+  if(el.value.trim()==='' && el.dataset.lama){ el.value = el.dataset.lama; }
+  pilihBahanKeluar(el);
+}
+
+viewTransaksi = function(tipe){
+  var label = tipe==='masuk' ? 'Stok Masuk (Pembelian)' : 'Stok Keluar (Pemakaian Manual)';
+  var itemsUntukForm = tipe==='keluar' ? daftarBahanKeluar() : items;
+  if(tipe==='masuk' && !masukSelectedItemId && itemsUntukForm.length>0) masukSelectedItemId = itemsUntukForm[0].id;
+  var options = itemsUntukForm.map(function(it){ return `<option value="${it.id}" ${tipe==='masuk'&&it.id===masukSelectedItemId?'selected':''}>${it.kode} - ${it.nama} (${it.satuan})</option>`; }).join('');
+  var supplierOptions = SUPPLIERS.map(function(s){ return `<option value="${s}">${s}</option>`; }).join('');
+
+  // -- Keluar: input ketik + daftar saran. Pilihan disimpan di keluarPilihId --
+  var itemFieldHtml = '';
+  if(tipe==='keluar'){
+    var terpilih = keluarPilihId ? itemById(keluarPilihId) : null;
+    var terpilihValid = terpilih && KELUAR_KAT_PATCH.indexOf(terpilih.kategori)>=0;
+    if(!terpilihValid) keluarPilihId = null;
+    var labelTerpilih = terpilihValid ? labelBarang(terpilih) : '';
+    var datalistOptions = itemsUntukForm.map(function(it){ return `<option value="${escAttr(labelBarang(it))}"></option>`; }).join('');
+    itemFieldHtml = `
+      <div class="field"><label>Barang (klik lalu ketik untuk mencari)</label>
+        <input type="text" id="keluar-item-input" list="keluar-item-list" autocomplete="off"
+          placeholder="ketik kode / nama, cth: Veda" required style="min-width:260px;"
+          value="${escAttr(labelTerpilih)}"
+          onfocus="bahanKeluarFokus(this)" oninput="pilihBahanKeluar(this)" onblur="bahanKeluarBlur(this)">
+        <datalist id="keluar-item-list">${datalistOptions}</datalist>
+        <input type="hidden" name="itemId" id="keluar-item-id" value="${terpilihValid ? terpilih.id : ''}">
+      </div>`;
+  } else {
+    itemFieldHtml = `<div class="field"><label>Barang</label><select name="itemId" id="trx-item-select" required>${options}</select></div>`;
+  }
+
+  var masukItem = (tipe==='masuk' && masukSelectedItemId) ? itemById(masukSelectedItemId) : null;
+  var masukResepList = (masukItem && masukItem.kategori==='premix') ? (masukItem.resepList||[]) : [];
+  var masukMultiHtml = '';
+  if(tipe==='masuk' && masukResepList.length>0){
+    var resepRows = masukResepList.slice().sort(function(a,b){ return a.resepQty-b.resepQty; }).map(function(r){
+      var kgTxt = r.premixKg>0 ? ` = ${r.premixKg} ${masukItem.satuan}` : ' (belum ada acuan kg)';
+      var varianTxt = (r.varian||[]).map(function(v){ return v.nama; }).join(', ') || 'belum ada varian';
+      return `<div class="field"><label>${r.resepQty}R${kgTxt}<br><span style="font-weight:400;font-size:10.5px;color:var(--brown-soft);">${varianTxt}</span></label><input type="number" min="0" step="any" class="masuk-resep-count-input" data-resep-id="${r.id}" placeholder="0x" oninput="hitungTotalMasukPremix();"></div>`;
+    }).join('');
+    masukMultiHtml = `
+    <div class="card" style="background:var(--cream);margin-bottom:10px;">
+      <h2 style="font-size:13px;">Pilih Ukuran Premix "${masukItem.nama}" yang Diterima</h2>
+      <div class="sub">Isi berapa kali tiap ukuran diterima (misal 5R x1, 3R x1, 1R x2) — total ${masukItem.satuan} yang masuk ke stok dihitung otomatis di kolom Jumlah bawah. <b>Pakai ini HANYA kalau kode barang "${masukItem.nama}" ini memang satu stok yang sama untuk semua ukuran</b> (misal premix curah yang dikemas ulang). Kalau tiap ukuran kemasan sebenarnya beda fisik/beda kode barang, pakai form "Catat Beberapa Barang Sekaligus" di bawah supaya stok tiap ukuran tidak kecampur.</div>
+      <form class="inline">${resepRows}</form>
+      <div class="note" id="masuk-total-premix-note">Total: 0 ${masukItem.satuan} (0 r)</div>
+    </div>`;
+  }
+
+  var masukBanyakBarangHtml = '';
+  if(tipe==='masuk'){
+    var rowsHtmlM = masukMultiRows.map(function(r,idx){
+      var itOpts = items.map(function(it){ return `<option value="${it.id}" ${it.id===r.itemId?'selected':''}>${it.kode} - ${it.nama} (${it.satuan})</option>`; }).join('');
+      return `<tr>
+      <td><select class="masuk-multi-item" data-idx="${idx}"><option value="">-- pilih barang --</option>${itOpts}</select></td>
+      <td><input type="number" step="any" min="0" class="masuk-multi-qty" data-idx="${idx}" value="${r.qty}" placeholder="jumlah" style="width:90px;"></td>
+      <td><input type="text" class="masuk-multi-ket" data-idx="${idx}" value="${r.ket}" placeholder="opsional" style="width:120px;"></td>
+      <td>${masukMultiRows.length>1?`<button type="button" class="danger" data-del-masuk-multi-row="${idx}">Hapus</button>`:''}</td>
+    </tr>`;
+    }).join('');
+    masukBanyakBarangHtml = `
+    <div class="card">
+      <h2>Catat Beberapa Barang Sekaligus</h2>
+      <div class="sub">Untuk kondisi kemasan beda-beda per ukuran (misal Premix Manis 1R, 3R, 5R = 3 kode barang terpisah di tab Kode). Isi sampai 4 baris sekaligus, tiap baris stoknya bertambah sendiri-sendiri sesuai kode barangnya — tidak digabung jadi satu angka, supaya pas stock opname jelas sisa tiap ukuran berapa.</div>
+      <div class="inline" style="margin-bottom:8px;">
+        <div class="field"><label>Tanggal</label><input type="date" id="masuk-multi-tanggal" value="${today()}"></div>
+        <div class="field"><label>CV / Supplier</label><select id="masuk-multi-supplier">${supplierOptions}</select></div>
+      </div>
+      <table><thead><tr><th>Barang</th><th>Jumlah</th><th>Keterangan</th><th></th></tr></thead>
+      <tbody id="masuk-multi-tbody">${rowsHtmlM}</tbody></table>
+      <div style="margin-top:8px;">
+        <button type="button" class="primary" id="btn-tambah-baris-masuk-multi" ${masukMultiRows.length>=4?'disabled':''}>+ Tambah Baris</button>
+        <button type="button" class="primary" id="btn-simpan-masuk-multi">Simpan Semua Baris</button>
+      </div>
+    </div>`;
+  }
+
+  var f = filterTrx[tipe];
+  var kategoriOptions = Object.keys(KATEGORI).map(function(k){ return `<option value="${k}" ${f.kategori===k?'selected':''}>${KATEGORI[k].label}</option>`; }).join('');
+
+  var list = trx.filter(function(t){ return t.tipe===tipe; });
+  if(f.kategori) list = list.filter(function(t){ var it=itemById(t.itemId); return it && it.kategori===f.kategori; });
+  if(f.dari) list = list.filter(function(t){ return t.tanggal>=f.dari; });
+  if(f.sampai) list = list.filter(function(t){ return t.tanggal<=f.sampai; });
+  list = list.slice().sort(function(a,b){ return b.tanggal.localeCompare(a.tanggal); });
+
+  var rows = list.map(function(t,idx){
+    var it = itemById(t.itemId); if(!it) return '';
+    var nilai = it.harga*t.qty;
+    var isEditing = editingRow && editingRow.dataset==='trx' && editingRow.id===t.id;
+    if(isEditing){
+      return `<tr data-edit-row="trx-${t.id}">
+        <td>${idx+1}</td>
+        <td><span class="kode-badge">${it.kode}</span></td>
+        <td>${it.nama}</td>
+        ${tipe==='masuk' ? `<td><select class="edit-supplier">${SUPPLIERS.map(function(s){ return `<option ${s===t.supplier?'selected':''}>${s}</option>`; }).join('')}</select></td>` : ''}
+        <td><input type="number" step="any" min="0" class="edit-qty" value="${t.qty}" style="width:90px;"></td>
+        <td>${rupiah(nilai)}</td>
+        <td><input type="text" class="edit-ket" value="${t.ket||''}" style="width:120px;"></td>
+        <td><input type="date" class="edit-tanggal" value="${t.tanggal}" style="width:130px;"></td>
+        <td>
+          <button class="primary" data-save-edit-trx="${t.id}" style="padding:5px 10px;">Simpan</button>
+          <button class="danger" data-batal-edit>Batal</button>
+        </td>
+      </tr>`;
+    }
+    return `<tr>
+      <td>${idx+1}</td>
+      <td><span class="kode-badge">${it.kode}</span></td>
+      <td>${it.nama}</td>
+      ${tipe==='masuk' ? `<td>${t.supplier||'-'}</td>` : ''}
+      <td>${t.qty.toLocaleString('id-ID')} ${it.satuan}</td>
+      <td>${rupiah(nilai)}</td>
+      <td>${t.ket||'-'}</td>
+      <td>${t.tanggal}</td>
+      <td>
+        <button class="danger" style="color:var(--blue)" data-edit-trx="${t.id}">Edit</button>
+        <button class="danger" data-del-trx="${t.id}">Hapus</button>
+      </td>
+    </tr>${renderRiwayatEditBoxRow(riwayatEditUntuk('trx', t.id))}`;
+  }).join('');
+
+  return `
+  ${tipe==='masuk' ? masukBanyakBarangHtml : ''}
+  <div class="card">
+    <h2>${label}${tipe==='masuk'?' — Barang Tunggal':''}</h2>
+    ${tipe==='keluar' ? `<div class="note">Premix keluar dicatat lewat tab <b>Produksi</b>, kardus &amp; bahan pembungkus (misal OPP) yang dipakai packing dicatat lewat tab <b>Packing</b>, dan retur dicatat lewat tab <b>Retur</b> — supaya stoknya tidak berkurang dobel. Tab ini khusus untuk pemakaian Bahan Baku DI LUAR packing/produksi (misal rusak/hilang/dipakai lain).</div>` : ''}
+    ${itemsUntukForm.length===0 ? `<div class="empty">${tipe==='keluar' ? 'Belum ada Bahan Baku terdaftar di tab Kode' : 'Tambahkan barang dulu di tab Kode'}</div>` : `
+    ${masukMultiHtml}
+    <form class="inline" id="form-trx" data-tipe="${tipe}" style="margin-top:10px;">
+      <div class="field"><label>Tanggal</label><input name="tanggal" type="date" value="${today()}" required></div>
+      ${itemFieldHtml}
+      ${tipe==='masuk' ? `<div class="field"><label>CV / Supplier</label><select name="supplier" required>${supplierOptions}</select></div>` : ''}
+      <div class="field"><label>Jumlah${masukResepList.length>0?' (otomatis)':''}</label><input name="qty" id="trx-qty-input" type="number" step="any" min="0" ${masukResepList.length>0?'readonly':''} required></div>
+      <div class="field"><label>Keterangan</label><input name="ket" placeholder="opsional"></div>
+      <button class="primary" type="submit">Simpan</button>
+    </form>`}
+  </div>
+  <div class="card">
+    <h2>Filter Riwayat</h2>
+    <form class="inline" id="form-filter-trx" data-tipe="${tipe}">
+      <div class="field"><label>Kategori</label><select name="kategori"><option value="">Semua</option>${kategoriOptions}</select></div>
+      <div class="field"><label>Dari Tanggal</label><input type="date" name="dari" value="${f.dari}"></div>
+      <div class="field"><label>Sampai Tanggal</label><input type="date" name="sampai" value="${f.sampai}"></div>
+      <button class="primary" type="submit">Terapkan Filter</button>
+      <button class="danger" type="button" id="btn-reset-filter-trx">Reset</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Riwayat ${label} (${list.length}${list.length!==trx.filter(function(t){ return t.tipe===tipe; }).length ? ' dari '+trx.filter(function(t){ return t.tipe===tipe; }).length : ''})</h2>
+    <table><thead><tr><th>No</th><th>Kode</th><th>Barang</th>${tipe==='masuk'?'<th>CV/Supplier</th>':''}<th>Jumlah</th><th>Nilai</th><th>Ket</th><th>Tanggal</th><th></th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="${tipe==='masuk'?9:8}" class="empty">Tidak ada transaksi sesuai filter</td></tr>`}</tbody></table>
+  </div>
+  `;
+};
+
+// ---------- Realtime: jangan reset tampilan saat user sedang mengisi form ----------
+var rtTimer = null;
+var renderTertunda = false;
+
+function userSedangMengisiForm(){
+  var main = document.getElementById('main');
+  if(!main) return false;
+  if(main.querySelector('form:focus-within')) return true;
+  var aktif = document.activeElement;
+  if(aktif && main.contains(aktif) && ['INPUT','SELECT','TEXTAREA'].indexOf(aktif.tagName)>=0) return true;
+  var isian = main.querySelectorAll(
+    'input:not([type=date]):not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not(#kalkulator-kg-input):not(.pm-paket), textarea'
+  );
+  for(var i=0;i<isian.length;i++){
+    var el = isian[i];
+    if(el.readOnly || el.disabled) continue;
+    if(String(el.value||'').trim()!=='') return true;
+  }
+  return false;
+}
+
+subscribeRealtime = function(){
+  DATASETS_DB.forEach(function(k){
+    sb.channel('sync2-'+k)
+      .on('postgres_changes', {event:'*', schema:'public', table:k}, function(){
+        clearTimeout(rtTimer);
+        rtTimer = setTimeout(async function(){
+          await loadAll();            // data di memori tetap diperbarui
+          updateDbStatusBadge();
+          if(userSedangMengisiForm()){ renderTertunda = true; return; }  // tampilan tidak di-reset
+          renderTertunda = false;
+          renderAll();
+        }, 500);
+      })
+      .subscribe();
+  });
+};
+
+// Kalau langganan realtime lama sudah terlanjur jalan, ganti dengan yang baru
+(function(){
+  try{
+    var lama = sb.getChannels();
+    if(lama.length>0){
+      lama.forEach(function(ch){ sb.removeChannel(ch); });
+      subscribeRealtime();
+    }
+  }catch(e){ console.error('Gagal mengganti langganan realtime', e); }
+})();
+</script>    
