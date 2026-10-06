@@ -3745,3 +3745,203 @@ subscribeRealtime = function(){
   }catch(e){ console.error('Gagal mengganti langganan realtime', e); }
 })();
 </script>    
+<script>
+// =====================================================================
+// PENGAMAN DATA
+// - konfirmasi sebelum hapus
+// - peringatan kalau perubahan akan menghapus banyak data sekaligus
+// - cadangan otomatis di HP/komputer (localStorage)
+// - tombol: Download Cadangan, Simpan Ulang ke Online, Pulihkan dari Cadangan
+// - peringatan sebelum menutup halaman kalau data belum tersimpan online
+// - muat ulang data (realtime) menunggu sampai proses simpan selesai
+// =====================================================================
+(function(){
+  var NAMA_DATA = ['items','trx','produksi','packing','penjualan','opname','retur','riwayatEdit'];
+
+  function semuaData(){
+    return {items:items, trx:trx, produksi:produksi, packing:packing, penjualan:penjualan, opname:opname, retur:retur, riwayatEdit:riwayatEdit};
+  }
+  function setData(nama, v){
+    if(nama==='items') items=v;
+    else if(nama==='trx') trx=v;
+    else if(nama==='produksi') produksi=v;
+    else if(nama==='packing') packing=v;
+    else if(nama==='penjualan') penjualan=v;
+    else if(nama==='opname') opname=v;
+    else if(nama==='retur') retur=v;
+    else if(nama==='riwayatEdit') riwayatEdit=v;
+  }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+  // ---------- 1. Konfirmasi sebelum hapus ----------
+  var PESAN_HAPUS = {
+    'data-del-item': 'HAPUS BARANG ini?\n\nSEMUA transaksi Masuk/Keluar barang ini juga ikut terhapus permanen.',
+    'data-del-trx': 'Hapus transaksi ini?',
+    'data-del-opname': 'Hapus data opname ini?',
+    'data-del-produksi': 'Hapus data produksi ini?\n\n(Pemotongan stok premixnya ikut dibatalkan.)',
+    'data-del-packing': 'Hapus data packing ini?\n\n(Pemotongan stok kardus/bahannya ikut dibatalkan.)',
+    'data-del-retur': 'Hapus data retur ini?',
+    'data-del-jual': 'Hapus data penjualan ini?',
+    'data-del-resep': 'Hapus resep ini?',
+    'data-del-ak': 'Hapus acuan konversi ini?',
+    'data-del-varian-master': 'Hapus nama varian ini dari daftar?'
+  };
+  document.addEventListener('click', function(e){
+    var btn = e.target && e.target.closest ? e.target.closest('button') : null;
+    if(!btn) return;
+    for(var attr in PESAN_HAPUS){
+      if(btn.hasAttribute(attr)){
+        if(!confirm(PESAN_HAPUS[attr])){ e.stopPropagation(); e.preventDefault(); }
+        return;
+      }
+    }
+  }, true);
+
+  // ---------- 2. Cadangan lokal ----------
+  function simpanCadanganLokal(key, val){
+    try{
+      if(typeof dbReady==='undefined' || !dbReady[key]) return;
+      var json = JSON.stringify(val);
+      localStorage.setItem('gudang_cad_terbaru_'+key, json);
+      var maxN = parseInt(localStorage.getItem('gudang_cad_maxn_'+key)||'0', 10);
+      if(val.length>=maxN){                       // simpan juga versi "paling banyak"
+        localStorage.setItem('gudang_cad_max_'+key, json);
+        localStorage.setItem('gudang_cad_maxn_'+key, String(val.length));
+      }
+    }catch(e){ console.warn('Cadangan lokal gagal', e); }
+  }
+  function cadanganSemua(){
+    if(typeof dbStatus!=='undefined' && dbStatus==='online'){
+      var d = semuaData();
+      NAMA_DATA.forEach(function(k){ simpanCadanganLokal(k, d[k]); });
+    }
+  }
+
+  // ---------- 3. Bungkus save(): anti hapus massal + cadangan ----------
+  var savesBerjalan = 0;
+  var saveVersi = 0;
+  var _saveAsli = save;
+  save = async function(key, val){
+    try{
+      var lama = (typeof lastSynced!=='undefined' && lastSynced[key]) ? lastSynced[key] : null;
+      if(lama && Array.isArray(val)){
+        var idBaru = new Set(val.map(function(r){ return r.id; }));
+        var akanDihapus = 0;
+        lama.forEach(function(v,id){ if(!idBaru.has(id)) akanDihapus++; });
+        if(akanDihapus>=10 && !confirm('PERINGATAN!\n\nPerubahan ini akan MENGHAPUS '+akanDihapus+' baris data "'+key+'" dari database online.\n\nLanjutkan?\n\n(Pilih Batal kalau tidak yakin — data akan dimuat ulang seperti semula.)')){
+          await loadAll(); renderAll(); return;
+        }
+      }
+    }catch(e){ console.error(e); }
+    saveVersi++;
+    savesBerjalan++;
+    try{ await _saveAsli(key, val); }
+    finally{ savesBerjalan--; }
+    simpanCadanganLokal(key, val);
+  };
+
+  // ---------- 4. Bungkus loadAll(): tunggu proses simpan selesai ----------
+  var _loadAsli = loadAll;
+  loadAll = async function(){
+    var coba = 0;
+    while(true){
+      var v0 = saveVersi;
+      while(savesBerjalan>0){ await sleep(150); }
+      await _loadAsli();
+      if(v0===saveVersi && savesBerjalan===0) break;   // tidak ada simpan baru selama memuat
+      if(++coba>=3) break;
+    }
+    cadanganSemua();
+  };
+
+  // ---------- 5. Peringatan sebelum menutup halaman ----------
+  window.addEventListener('beforeunload', function(e){
+    if((typeof dbStatus!=='undefined' && dbStatus==='offline') || savesBerjalan>0){
+      e.preventDefault(); e.returnValue = '';
+    }
+  });
+
+  // ---------- 6. Bar cadangan + tombol ----------
+  function tampilBar(){
+    var nav = document.getElementById('nav');
+    if(!nav) return;
+    var el = document.getElementById('bar-cadangan');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'bar-cadangan';
+      nav.parentNode.insertBefore(el, nav);
+      el.addEventListener('click', async function(e){
+        var id = e.target && e.target.id;
+        if(id==='btn-cad-unduh'){ document.getElementById('btn-export-excel').click(); }
+        else if(id==='btn-cad-sinkron'){ await simpanUlangOnline(); }
+        else if(id==='btn-cad-pulih'){ await pulihkanDariCadangan(); }
+      });
+    }
+    var last = null;
+    try{ last = localStorage.getItem('gudang_last_export'); }catch(err){}
+    var hari = last ? Math.floor((Date.now()-new Date(last).getTime())/86400000) : null;
+    var aman = (hari!==null && hari<1);
+    el.style.cssText = 'padding:8px 18px;font-size:12.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid '+(aman?'#9cc7b5':'#e0c36a')+';background:'+(aman?'#e6f2ec':'#fff4d6')+';color:#4a3728;';
+    var pesan = hari===null ? '⚠ Belum ada cadangan Excel di perangkat ini.'
+              : (hari>=1 ? '⚠ Cadangan Excel terakhir '+hari+' hari lalu.' : '✅ Cadangan Excel hari ini sudah ada.');
+    var st = 'padding:5px 10px;font-size:12px;';
+    el.innerHTML = '<span>'+pesan+'</span>'
+      + '<button type="button" class="primary" id="btn-cad-unduh" style="'+st+'">⬇ Download Cadangan</button>'
+      + '<button type="button" class="primary" id="btn-cad-sinkron" style="'+st+'">☁ Simpan Ulang ke Online</button>'
+      + '<button type="button" class="primary" id="btn-cad-pulih" style="'+st+'">♻ Pulihkan dari Cadangan HP</button>';
+  }
+  var btnExp = document.getElementById('btn-export-excel');
+  if(btnExp){
+    btnExp.addEventListener('click', function(){
+      try{ localStorage.setItem('gudang_last_export', new Date().toISOString()); }catch(err){}
+      tampilBar();
+    });
+  }
+
+  // Kirim ulang semua data yang belum sempat tersimpan online (misal karena internet putus)
+  async function simpanUlangOnline(){
+    var d = semuaData();
+    for(var i=0;i<NAMA_DATA.length;i++){ await save(NAMA_DATA[i], d[NAMA_DATA[i]]); }
+    updateDbStatusBadge();
+    alert(dbStatus==='online' ? 'Selesai. Semua data sudah tersimpan online.' : 'Masih gagal tersambung. Cek internet lalu coba lagi.');
+  }
+
+  // Kembalikan baris yang ada di cadangan HP tapi tidak ada di database (hanya MENAMBAH, tidak menimpa)
+  async function pulihkanDariCadangan(){
+    var d = semuaData();
+    var tambahan = {};
+    var info = [];
+    NAMA_DATA.forEach(function(k){
+      var kumpul = [];
+      ['gudang_cad_max_','gudang_cad_terbaru_'].forEach(function(p){
+        try{ var j = localStorage.getItem(p+k); if(j) kumpul = kumpul.concat(JSON.parse(j)); }catch(err){}
+      });
+      var sudah = new Set(d[k].map(function(r){ return r.id; }));
+      var terlihat = {};
+      var baru = kumpul.filter(function(r){
+        if(!r || !r.id || sudah.has(r.id) || terlihat[r.id]) return false;
+        terlihat[r.id] = 1; return true;
+      });
+      tambahan[k] = baru;
+      if(baru.length>0) info.push(k+': '+baru.length+' baris');
+    });
+    if(info.length===0){
+      alert('Tidak ada data di cadangan perangkat ini yang hilang dari database.\n\n(Cadangan hanya ada di HP/komputer yang pernah dipakai input.)');
+      return;
+    }
+    if(!confirm('Ditemukan data di cadangan perangkat ini yang TIDAK ADA di database:\n\n'+info.join('\n')+'\n\nTambahkan kembali ke database?\n(Data yang sudah ada tidak diubah. Data yang dulu sengaja dihapus bisa muncul lagi.)')) return;
+    for(var i=0;i<NAMA_DATA.length;i++){
+      var k = NAMA_DATA[i];
+      if(tambahan[k].length>0){
+        setData(k, semuaData()[k].concat(tambahan[k]));
+        await save(k, semuaData()[k]);
+      }
+    }
+    renderAll();
+    alert('Selesai. Data sudah dikembalikan.');
+  }
+
+  tampilBar();
+  setTimeout(cadanganSemua, 10000);   // cadangan awal setelah data selesai dimuat
+})();
+</script>
