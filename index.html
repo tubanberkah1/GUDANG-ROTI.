@@ -3945,3 +3945,53 @@ subscribeRealtime = function(){
   setTimeout(cadanganSemua, 10000);   // cadangan awal setelah data selesai dimuat
 })();
 </script>
+<script>
+// =====================================================================
+// KATEGORI BARU "LAINNYA" (non-bahan) di tab Kode
+// - muncul di pilihan Kategori saat Tambah Kode Barang
+// - kode otomatis LNN001, LNN002, dst
+// - muncul juga di tab Keluar (input ketik), Arus, Opname, Laporan, Dashboard
+// Tidak mengubah struktur data / koneksi Supabase.
+// =====================================================================
+(function(){
+  // 1. Daftarkan kategori baru
+  KATEGORI.lainnya = { label:'Lainnya', hasHasil:false };
+
+  // 2. Warna label kategori
+  var st = document.createElement('style');
+  st.textContent = '.tag.lainnya{background:rgb(225,232,241);color:rgb(46,92,138);}';
+  document.head.appendChild(st);
+
+  // 3. Kode otomatis (LNN001, ...) - pakai nomor terbesar yang ada supaya tidak kembar
+  nextKode = function(kategori){
+    var pfx = {premix:'PMX', bahan:'BHN', kardus:'KRD', lainnya:'LNN'}[kategori] || 'BRG';
+    var maks = 0, jumlah = 0;
+    items.forEach(function(i){
+      if(i.kategori===kategori){
+        jumlah++;
+        var m = String(i.kode||'').match(/(\d+)$/);
+        if(m) maks = Math.max(maks, parseInt(m[1],10));
+      }
+    });
+    return pfx + String(Math.max(maks, jumlah)+1).padStart(3,'0');
+  };
+
+  // 4. Tambahkan pilihan "Lainnya" di form Tambah Kode Barang
+  var _viewKodeAsli = viewKode;
+  viewKode = function(){
+    var html = _viewKodeAsli();
+    return html.replace(
+      '<option value="kardus">Kardus</option>',
+      '<option value="kardus">Kardus</option><option value="lainnya">Lainnya (non-bahan)</option>'
+    );
+  };
+
+  // 5. Barang "Lainnya" ikut muncul di input ketik tab Keluar
+  if(typeof KELUAR_KAT_PATCH!=='undefined' && KELUAR_KAT_PATCH.indexOf('lainnya')<0){
+    KELUAR_KAT_PATCH.push('lainnya');
+  }
+
+  // Segarkan tampilan
+  if(typeof renderAll==='function') renderAll();
+})();
+</script>
