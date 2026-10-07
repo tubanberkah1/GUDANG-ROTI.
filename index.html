@@ -4249,9 +4249,6 @@ subscribeRealtime = function(){
   setTimeout(function(){ t.remove(); }, 5000);
 })();
 </script>
-// =====================================================================
-// PRODUKSI GABUNGAN — pengganti kartu "Catat Produksi: Banyak Premix / Ukuran Sekaligus"
-//
 // Cara pasang: tempel SELURUH isi file ini sebagai blok <script> BARU di paling bawah
 // index.html (setelah blok script "REKON KODE"), sebelum </body>. Tidak ada kode lama
 // yang perlu dihapus atau diubah.
@@ -4487,9 +4484,7 @@ subscribeRealtime = function(){
     S={rows:[{itemId:'',resepId:'',paket:1}], v:{}, ex:[{n:'',p:''},{n:'',p:''},{n:'',p:''}], kel:'', ket:'', tgl:'', alasan:''};
     renderAll();
   }
-
-  // Hapus / edit produksi gabungan: kembalikan stok SEMUA kode yang terpotong
-  window.addEventListener('click',async function(e){
+ window.addEventListener('click',async function(e){
     var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
     var del=b.getAttribute('data-del-produksi');
     var ed=b.getAttribute('data-edit-produksi')||b.getAttribute('data-save-edit-produksi');
