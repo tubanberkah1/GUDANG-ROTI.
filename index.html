@@ -4447,454 +4447,267 @@ subscribeRealtime = function(){
 })();
 </script>
 <script>
+<script>
 // =====================================================================
-// TAB "REKON R": Ambil Premix (Admin Gudang) -> Catat Hasil (Admin Packing)
-// -> Rekonsiliasi Selisih R.   Total R Terpakai = Σ (pcs varian ÷ standar pcs per 1R)
-// Data disimpan di tabel riwayatEdit yang sudah ada (tanpa tabel Supabase baru),
-// stok premix dipotong lewat transaksi Keluar (Arus & Opname tetap konsisten),
-// hasil otomatis masuk ke Produksi -> stok roti jadi -> Packing.
+// TAB "REKON KODE": ambil beberapa kode premix sekaligus (1R/3R/5R),
+// standar jadi MELEKAT PER KODE, hasil roti dicatat per varian dalam satu kelompok.
+// Standar Jadi total = Σ (standar kode × jumlah diambil).  Selisih = Hasil − Standar.
 // =====================================================================
 (function(){
-  var DS_V='rk_varian', DS_A='rk_ambil', DS_H='rk_hasil';
-  var RK = { qty:{}, tanggal:'', admin:'', catatan:'', hasilAmbilId:null, pcs:{}, hasilTanggal:'', hasilAdmin:'', hasilAlasan:'', toleransi:0.5 };
+  var DA='rkk_ambil', DH='rkk_hasil';
+  var S={qty:{}, tgl:'', admin:'', cat:'', pickId:null, pcs:{}, extra:[{n:'',p:''},{n:'',p:''},{n:'',p:''}], hTgl:'', hAdmin:'', alasan:'', kel:'', tol:5};
   try{
-    var tl = parseFloat(localStorage.getItem('rk_toleransi')); if(tl>=0) RK.toleransi = tl;
-    RK.admin = localStorage.getItem('rk_admin_gudang')||'';
-    RK.hasilAdmin = localStorage.getItem('rk_admin_packing')||'';
+    var t=parseFloat(localStorage.getItem('rkk_tol')); if(t>=0) S.tol=t;
+    S.admin=localStorage.getItem('rkk_admin_g')||''; S.hAdmin=localStorage.getItem('rkk_admin_p')||'';
   }catch(e){}
+  var VN=[];
 
-  // ---------- gaya ----------
-  var st = document.createElement('style');
-  st.textContent =
-   '.rk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin:10px 0;}'
-  +'.rk-card{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--cream);}'
-  +'.rk-card.on{border-color:var(--amber);background:#fff4d6;}'
-  +'.rk-card.over{border-color:var(--red);background:#f5dad3;}'
-  +'.rk-kode{font:700 11.5px monospace;color:var(--brown-soft);}'
-  +'.rk-step{display:flex;align-items:center;gap:6px;margin-top:8px;}'
-  +'.rk-step button{width:40px;height:40px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:22px;font-weight:700;cursor:pointer;color:var(--brown);}'
-  +'.rk-step input{width:70px;height:40px;text-align:center;font-size:16px;border:1px solid var(--line);border-radius:8px;}'
-  +'.rk-sticky{position:sticky;top:0;z-index:20;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0;box-shadow:0 2px 6px rgba(0,0,0,.1);}'
-  +'.rk-prog{height:12px;background:#eee;border-radius:8px;overflow:hidden;margin-top:8px;}'
-  +'.rk-prog>div{height:100%;background:var(--teal);width:0;transition:width .2s;}'
-  +'.rk-badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}'
-  +'.rk-ok{background:#dceae2;color:#2e6e62}.rk-warn{background:#fbecc8;color:#8a5a16}.rk-bad{background:#f5dad3;color:#b4442e}.rk-gray{background:#eee;color:#666}'
-  +'.rk-pick{cursor:pointer;border:2px solid var(--line);border-radius:10px;padding:10px;background:#fff;text-align:left;font-family:inherit;color:var(--brown);font-size:13px;}'
-  +'.rk-pick.on{border-color:var(--amber);background:#fff4d6;}'
-  +'.rk-gh td{background:var(--wheat);font-weight:700;}';
+  var st=document.createElement('style');
+  st.textContent=
+   '.rkk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin:10px 0;}'
+  +'.rkk-card{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--cream);}'
+  +'.rkk-card.on{border-color:var(--amber);background:#fff4d6;}.rkk-card.over{border-color:var(--red);background:#f5dad3;}'
+  +'.rkk-step{display:flex;align-items:center;gap:6px;margin-top:8px;}'
+  +'.rkk-step button{width:40px;height:40px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:22px;font-weight:700;cursor:pointer;color:var(--brown);}'
+  +'.rkk-step input{width:70px;height:40px;text-align:center;font-size:16px;border:1px solid var(--line);border-radius:8px;}'
+  +'.rkk-sticky{position:sticky;top:0;z-index:20;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0;box-shadow:0 2px 6px rgba(0,0,0,.1);}'
+  +'.rkk-badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}'
+  +'.rkk-ok{background:#dceae2;color:#2e6e62}.rkk-warn{background:#fbecc8;color:#8a5a16}.rkk-bad{background:#f5dad3;color:#b4442e}.rkk-gray{background:#eee;color:#666}'
+  +'.rkk-pick{cursor:pointer;border:2px solid var(--line);border-radius:10px;padding:10px;background:#fff;text-align:left;font-family:inherit;color:var(--brown);font-size:13px;}'
+  +'.rkk-pick.on{border-color:var(--amber);background:#fff4d6;}';
   document.head.appendChild(st);
 
-  // ---------- helper ----------
-  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function fmt(n,d){ return (n||0).toLocaleString('id-ID',{maximumFractionDigits:d==null?2:d}); }
-  function list(ds){ return riwayatEdit.filter(function(r){ return r.dataset===ds; }); }
-  function deteksiR(it){
-    var m = String((it&&it.nama)||'').match(/(\d+(?:[.,]\d+)?)\s*R\b/i);
-    return m ? (parseFloat(m[1].replace(',','.'))||1) : 1;
+  function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function fmt(n,d){return (n||0).toLocaleString('id-ID',{maximumFractionDigits:d==null?2:d});}
+  function list(ds){return riwayatEdit.filter(function(r){return r.dataset===ds;});}
+  function nilaiR(it){var v=parseFloat(it&&it.nilaiR); if(v>0) return v; var m=String((it&&it.nama)||'').match(/(\d+(?:[.,]\d+)?)\s*R\b/i); return m?(parseFloat(m[1].replace(',','.'))||1):1;}
+  // standar per kemasan: isian sendiri, kalau kosong pakai angka paling umum dari data lama
+  function modeStd(it){
+    var vals=[]; (it.resepList||[]).forEach(function(r){var v=(r.varian||[])[0]; if(!v)return;
+      var mn=Number(v.min)||0, mx=(v.max!=null&&v.max!=='')?Number(v.max):mn, a=(mn+mx)/2; if(a>0) vals.push(a);});
+    if(!vals.length) return 0;
+    var c={},best=0,bc=0; vals.forEach(function(s){c[s]=(c[s]||0)+1;});
+    Object.keys(c).forEach(function(k){var n=c[k],s=parseFloat(k); if(n>bc||(n===bc&&s>best)){bc=n;best=s;}});
+    return best;
   }
-  function nilaiR(it){ var v = parseFloat(it && it.nilaiR); return v>0 ? v : deteksiR(it); }
-  function namaItem(id){ var it=itemById(id); return it ? it.nama : '(dihapus)'; }
-  function statusRk(dr, tp, ada){
-    if(!ada) return {t:'BELUM ADA HASIL', c:'rk-gray'};
-    var s = dr - tp;
-    if(Math.abs(s) <= RK.toleransi) return {t:'NORMAL', c:'rk-ok'};
-    return s>0 ? {t:'HASIL KURANG', c:'rk-bad'} : {t:'HASIL LEBIH', c:'rk-warn'};
+  function std(it){var v=parseFloat(it.standarHasil); return v>0?v:modeStd(it);}
+  function premixList(){return items.filter(function(i){return i.kategori==='premix';});}
+  function kelDefault(its){
+    var b=its.slice().sort(function(a,c){return nilaiR(c)-nilaiR(a);})[0]; if(!b) return '';
+    var n=String(b.nama||'').replace(/\bPMX\b/ig,'').replace(/\d+(?:[.,]\d+)?\s*R\b/ig,'').replace(/\s+/g,' ').trim();
+    return n||b.nama;
   }
-  function rincianAmbil(a){
-    return (a.items||[]).map(function(i){ return esc(namaItem(i.itemId))+' ×'+fmt(i.qty,2)+' ('+fmt(i.r,2)+'R)'; }).join(' + ');
+  function namaVarian(){
+    var set={};
+    semuaVarianNama().forEach(function(n){set[n]=1;});
+    items.forEach(function(it){(it.varianMaster||[]).forEach(function(n){set[n]=1;}); (it.resepList||[]).forEach(function(r){(r.varian||[]).forEach(function(v){set[v.nama]=1;});});});
+    return Object.keys(set).sort();
   }
-  // saran standar pcs per R dari data lama (cek lagi sebelum dipakai)
-  function sarankanStandar(){
-    var map = {};
-    items.filter(function(i){ return i.kategori==='premix'; }).forEach(function(it){
-      (it.resepList||[]).forEach(function(rs){
-        var rq = parseFloat(rs.resepQty)||1;
-        (rs.varian||[]).forEach(function(v){
-          var mn=Number(v.min)||0, mx=(v.max!=null&&v.max!=='')?Number(v.max):mn, avg=(mn+mx)/2;
-          if(avg>0 && !(v.nama in map)) map[v.nama] = Math.round(avg/(rq>1 ? rq : nilaiR(it))*100)/100;
-        });
-      });
-    });
-    return map;
+  function status(a,pcs,ada){
+    if(!ada) return {t:'BELUM ADA HASIL',c:'rkk-gray'};
+    var sel=pcs-a.totalStd, tol=a.totalStd*S.tol/100;
+    if(Math.abs(sel)<=tol) return {t:'NORMAL',c:'rkk-ok'};
+    return sel<0?{t:'HASIL KURANG',c:'rkk-bad'}:{t:'HASIL LEBIH',c:'rkk-warn'};
   }
-  function parseBulk(txt, kelDef){
-    var out=[];
-    String(txt||'').split(/\r?\n/).forEach(function(line){
-      line=line.trim(); if(!line) return;
-      var p=line.split(/[;\t|]/).map(function(s){ return s.trim(); });
-      var nama, kel=kelDef, std=0;
-      if(p.length>=3){ nama=p[0]; kel=p[1]||kelDef; std=parseFloat(String(p[2]).replace(',','.'))||0; }
-      else if(p.length===2){ nama=p[0]; var n=parseFloat(String(p[1]).replace(',','.')); if(!isNaN(n)) std=n; else kel=p[1]; }
-      else nama=p[0];
-      if(nama) out.push({nama:nama, kel:kel||'Lainnya', std:std});
-    });
-    return out;
-  }
+  function rinci(a){return (a.items||[]).map(function(i){var it=itemById(i.itemId);return esc(it?it.nama:'(dihapus)')+' ×'+fmt(i.qty,2);}).join(' + ');}
 
-  // ---------- tampilan ----------
-  function viewRekon(){
-    var premix = items.filter(function(i){ return i.kategori==='premix'; });
-    var varian = list(DS_V).sort(function(a,b){ return (a.kelompok||'').localeCompare(b.kelompok||'') || a.nama.localeCompare(b.nama); });
-    var ambilAll = list(DS_A).sort(function(a,b){ return (b.no||0)-(a.no||0); });
-    var open = ambilAll.filter(function(a){ return a.status==='OPEN'; });
-    var sel = RK.hasilAmbilId ? open.find(function(a){ return a.id===RK.hasilAmbilId; }) : null;
-    if(!sel) RK.hasilAmbilId = null;
-    if(!RK.tanggal) RK.tanggal = today();
-    if(!RK.hasilTanggal) RK.hasilTanggal = today();
+  function view(){
+    var pm=premixList(), ambilAll=list(DA).sort(function(a,b){return (b.no||0)-(a.no||0);});
+    var open=ambilAll.filter(function(a){return a.status==='OPEN';});
+    var sel=S.pickId?open.find(function(a){return a.id===S.pickId;}):null; if(!sel) S.pickId=null;
+    if(!S.tgl) S.tgl=today(); if(!S.hTgl) S.hTgl=today();
 
-    // --- A. Ambil premix ---
-    var cards = premix.map(function(it){
-      var q = RK.qty[it.id]||'';
-      var stok = stokItem(it.id).sisa;
-      return '<div class="rk-card" data-id="'+it.id+'" data-text="'+esc((it.kode+' '+it.nama).toLowerCase())+'">'
-        +'<div class="rk-kode">'+esc(it.kode)+'</div><div style="font-weight:600;">'+esc(it.nama)+'</div>'
-        +'<div class="note" style="margin:2px 0 0 0;">'+fmt(nilaiR(it),2)+' R per kemasan · stok <b>'+fmt(stok,2)+'</b> '+esc(it.satuan)+'</div>'
-        +'<div class="rk-step"><button type="button" data-rk-minus="'+it.id+'">−</button>'
-        +'<input type="number" min="0" step="any" class="rk-qty" data-id="'+it.id+'" value="'+esc(q)+'" placeholder="0">'
-        +'<button type="button" data-rk-plus="'+it.id+'">+</button></div></div>';
+    var cards=pm.map(function(it){
+      var q=S.qty[it.id]||'', sd=std(it);
+      return '<div class="rkk-card" data-id="'+it.id+'"><div class="kode-badge" style="display:inline-block;">'+esc(it.kode)+'</div> <b>'+esc(it.nama)+'</b>'
+        +'<div class="note" style="margin:3px 0;">'+fmt(nilaiR(it),2)+' R · stok <b>'+fmt(stokItem(it.id).sisa,2)+'</b> '+esc(it.satuan)+'</div>'
+        +'<div class="field"><label>Standar jadi per kemasan ('+esc(satuanHasilItem(it))+')</label><input type="number" min="0" step="any" class="rkk-std" data-id="'+it.id+'" value="'+esc(sd||'')+'" placeholder="isi standar"></div>'
+        +'<div class="rkk-step"><button type="button" data-minus="'+it.id+'">−</button><input type="number" min="0" step="any" class="rkk-qty" data-id="'+it.id+'" value="'+esc(q)+'" placeholder="0"><button type="button" data-plus="'+it.id+'">+</button></div></div>';
     }).join('');
-    var A = '<div class="card"><h2>1. Admin Gudang — Ambil Premix</h2>'
-      +'<div class="sub">Pilih kemasan yang diambil produksi (misal 1 pak PMX 1R + 1 pak PMX 3R + 1 pak PMX 5R). Stok tiap kode dipotong sesuai yang diambil, dan total adonan dihitung dalam R.</div>'
-      +(premix.length===0 ? '<div class="empty">Belum ada barang kategori Premix di tab Kode</div>' : (
-        '<div class="inline"><div class="field"><label>Tanggal</label><input type="date" id="rk-tgl" value="'+esc(RK.tanggal)+'"></div>'
-        +'<div class="field"><label>Nama Admin Gudang</label><input type="text" id="rk-admin" value="'+esc(RK.admin)+'" placeholder="nama"></div>'
-        +'<div class="field"><label>Cari premix</label><input type="text" id="rk-cari-pm" placeholder="ketik: manis"></div></div>'
-        +'<div class="rk-grid">'+cards+'</div>'
-        +'<div class="rk-sticky" id="rk-ambil-bar"></div>'
-        +'<div class="inline"><div class="field" style="flex:1;"><label>Catatan (opsional)</label><input type="text" id="rk-cat" value="'+esc(RK.catatan)+'" style="width:100%;"></div>'
-        +'<button type="button" class="primary" id="rk-simpan-ambil">Simpan Pengambilan</button></div>'))
-      +'</div>';
+    var A='<div class="card"><h2>1. Admin Gudang — Ambil Premix (boleh beberapa kode sekaligus)</h2>'
+      +'<div class="sub">Tekan + pada tiap kode yang diambil (misal PMX016 1R, PMX017 3R, PMX018 5R). Stok tiap kode dipotong sendiri-sendiri. <b>Standar jadi diisi per kode</b> (tidak harus lurus), dan total standar dijumlahkan otomatis.</div>'
+      +(pm.length===0?'<div class="empty">Belum ada barang kategori Premix di tab Kode</div>':
+       '<div class="inline"><div class="field"><label>Tanggal</label><input type="date" id="rkk-tgl" value="'+esc(S.tgl)+'"></div>'
+       +'<div class="field"><label>Nama Admin Gudang</label><input type="text" id="rkk-admin" value="'+esc(S.admin)+'"></div></div>'
+       +'<div class="rkk-grid">'+cards+'</div><div class="rkk-sticky" id="rkk-bar"></div>'
+       +'<div class="inline"><div class="field" style="flex:1;"><label>Catatan (opsional)</label><input type="text" id="rkk-cat" value="'+esc(S.cat)+'" style="width:100%;"></div>'
+       +'<button type="button" class="primary" id="rkk-simpan-ambil">Simpan Pengambilan</button></div>')+'</div>';
 
-    // --- B. Catat hasil ---
-    var picks = open.map(function(a){
-      return '<button type="button" class="rk-pick'+(sel&&sel.id===a.id?' on':'')+'" data-rk-pick="'+a.id+'"><b>#'+a.no+'</b> · '+esc(a.tanggal)+' · <b>'+fmt(a.totalR,2)+' R</b>'
-        +'<div class="note" style="margin:3px 0 0 0;">'+rincianAmbil(a)+'</div></button>';
-    }).join('');
-    var B = '<div class="card"><h2>2. Admin Packing — Catat Hasil Roti</h2>'
-      +'<div class="sub">Pilih pengambilan yang belum ditutup, lalu isi pcs tiap varian roti yang jadi. Sistem menghitung R terpakai = pcs ÷ standar per 1R, dan membandingkannya dengan R yang diambil.</div>'
-      +(open.length===0 ? '<div class="empty">Tidak ada pengambilan yang menunggu hasil. Catat dulu di bagian 1.</div>'
-        : '<div class="rk-grid">'+picks+'</div>');
+    var picks=open.map(function(a){return '<button type="button" class="rkk-pick'+(sel&&sel.id===a.id?' on':'')+'" data-pick="'+a.id+'"><b>#'+a.no+'</b> · '+esc(a.tanggal)+' · standar <b>'+fmt(a.totalStd,1)+'</b> · '+fmt(a.totalR,2)+' R<div class="note" style="margin:3px 0 0 0;">'+rinci(a)+'</div></button>';}).join('');
+    var B='<div class="card"><h2>2. Admin Packing — Catat Hasil Roti</h2><div class="sub">Pilih pengambilan, isi pcs tiap varian. Semua varian dihitung sebagai satu hasil jadi dan dibandingkan dengan total standar.</div>'
+      +(open.length===0?'<div class="empty">Tidak ada pengambilan yang menunggu hasil.</div>':'<div class="rkk-grid">'+picks+'</div>');
     if(sel){
-      var rowsV = '', lastKel = null;
-      varian.forEach(function(v){
-        if(v.kelompok!==lastKel){ lastKel=v.kelompok; rowsV += '<tr class="rk-gh"><td colspan="4">'+esc(v.kelompok||'Lainnya')+'</td></tr>'; }
-        var ok = v.standar>0;
-        rowsV += '<tr class="rk-vrow" data-nama="'+esc((v.nama+' '+(v.kelompok||'')).toLowerCase())+'"><td>'+esc(v.nama)+'</td>'
-          +'<td>'+(ok ? fmt(v.standar,2)+' /R' : '<span class="sisa-low">isi standar dulu</span>')+'</td>'
-          +'<td><input type="number" min="0" step="any" class="rk-pcs" data-vid="'+v.id+'" value="'+esc(RK.pcs[v.id]==null?'':RK.pcs[v.id])+'" placeholder="pcs" style="width:100px;"'+(ok?'':' disabled')+'></td>'
-          +'<td data-rv="'+v.id+'">-</td></tr>';
-      });
-      B += '<div class="rk-sticky"><div class="grid">'
-        +'<div class="stat"><div class="label">R Diambil (#'+sel.no+')</div><div class="value" id="rk-h-diambil">'+fmt(sel.totalR,2)+' R</div></div>'
-        +'<div class="stat"><div class="label">R Terpakai</div><div class="value" id="rk-h-terpakai">0 R</div></div>'
-        +'<div class="stat" id="rk-h-selbox"><div class="label">Selisih (Diambil − Terpakai)</div><div class="value" id="rk-h-selisih">0 R</div></div>'
-        +'<div class="stat"><div class="label">Status</div><div class="value" id="rk-h-status" style="font-size:14px;">-</div></div>'
-        +'</div><div class="rk-prog"><div id="rk-h-prog"></div></div></div>'
-        +(varian.length===0 ? '<div class="empty">Master varian roti masih kosong. Isi dulu di bagian 4 (bawah).</div>' : (
-          '<div class="inline"><div class="field"><label>Cari varian</label><input type="text" id="rk-cari-v" placeholder="ketik nama varian"></div>'
-          +'<div class="field"><label>Tanggal</label><input type="date" id="rk-h-tgl" value="'+esc(RK.hasilTanggal)+'"></div>'
-          +'<div class="field"><label>Nama Admin Packing</label><input type="text" id="rk-h-admin" value="'+esc(RK.hasilAdmin)+'" placeholder="nama"></div></div>'
-          +'<table><thead><tr><th>Varian Roti</th><th>Standar</th><th>Hasil (pcs)</th><th>Setara</th></tr></thead><tbody>'+rowsV+'</tbody></table>'
-          +'<div class="field" id="rk-alasan-box" style="display:none;margin-top:10px;"><label>Alasan selisih (wajib diisi karena di luar toleransi)</label>'
-          +'<input type="text" id="rk-h-alasan" value="'+esc(RK.hasilAlasan)+'" placeholder="cth: adonan tumpah / hasil belum lengkap / salah timbang" style="width:100%;"></div>'
-          +'<div style="margin-top:10px;"><button type="button" class="primary" id="rk-simpan-hasil">Simpan &amp; Tutup Pengambilan #'+sel.no+'</button></div>'));
+      VN=namaVarian(); if(!S.kel) S.kel=kelDefault(sel.items.map(function(i){return itemById(i.itemId);}).filter(Boolean));
+      var rows=VN.map(function(n,i){return '<tr class="rkk-vrow" data-n="'+esc(n.toLowerCase())+'"><td>'+esc(n)+'</td><td><input type="number" min="0" step="any" class="rkk-pcs" data-i="'+i+'" value="'+esc(S.pcs[n]==null?'':S.pcs[n])+'" placeholder="pcs" style="width:110px;"></td></tr>';}).join('');
+      var ex=S.extra.map(function(e,i){return '<tr><td><input type="text" class="rkk-exn" data-i="'+i+'" value="'+esc(e.n)+'" placeholder="varian baru (ketik nama)" style="width:210px;"></td><td><input type="number" min="0" step="any" class="rkk-exp" data-i="'+i+'" value="'+esc(e.p)+'" placeholder="pcs" style="width:110px;"></td></tr>';}).join('');
+      B+='<div class="rkk-sticky"><div class="grid">'
+        +'<div class="stat"><div class="label">Standar Jadi (tetap)</div><div class="value" id="rkk-h-std">'+fmt(sel.totalStd,1)+'</div></div>'
+        +'<div class="stat"><div class="label">Total Jadi (aktual)</div><div class="value" id="rkk-h-jadi">0</div></div>'
+        +'<div class="stat" id="rkk-h-box"><div class="label">Selisih</div><div class="value" id="rkk-h-sel">0</div></div>'
+        +'<div class="stat"><div class="label">Status</div><div class="value" id="rkk-h-st" style="font-size:14px;">-</div></div></div></div>'
+        +'<div class="inline"><div class="field"><label>Cari varian</label><input type="text" id="rkk-cari" placeholder="ketik nama roti"></div>'
+        +'<div class="field"><label>Nama hasil jadi (kelompok di stok)</label><input type="text" id="rkk-kel" value="'+esc(S.kel)+'"></div>'
+        +'<div class="field"><label>Tanggal</label><input type="date" id="rkk-htgl" value="'+esc(S.hTgl)+'"></div>'
+        +'<div class="field"><label>Nama Admin Packing</label><input type="text" id="rkk-hadmin" value="'+esc(S.hAdmin)+'"></div></div>'
+        +'<table><thead><tr><th>Varian Roti</th><th>Hasil (pcs)</th></tr></thead><tbody>'+rows+ex+'</tbody></table>'
+        +'<div class="field" id="rkk-alasan-box" style="display:none;margin-top:10px;"><label>Alasan selisih (wajib, karena di luar toleransi)</label><input type="text" id="rkk-alasan" value="'+esc(S.alasan)+'" style="width:100%;"></div>'
+        +'<div style="margin-top:10px;"><button type="button" class="primary" id="rkk-simpan-hasil">Simpan &amp; Tutup Pengambilan #'+sel.no+'</button></div>';
     }
-    B += '</div>';
+    B+='</div>';
 
-    // --- C. Riwayat & rekonsiliasi ---
-    var hasilAll = list(DS_H);
-    var rowsC = ambilAll.map(function(a){
-      var h = hasilAll.find(function(x){ return x.ambilId===a.id; });
-      var tp = h ? h.rTerpakai : 0, sel2 = a.totalR - tp, s = statusRk(a.totalR, tp, !!h);
-      var det = h ? (h.items||[]).map(function(v){ return esc(v.nama)+' '+fmt(v.pcs,0)+' pcs = '+fmt(v.pcs/v.standar,2)+'R'; }).join(' · ') : '';
-      return '<tr><td>#'+a.no+'</td><td>'+esc(a.tanggal)+'</td><td>'+esc(a.admin||'-')+'</td><td>'+rincianAmbil(a)+'</td>'
-        +'<td>'+fmt(a.totalR,2)+' R</td><td>'+(h?fmt(tp,2)+' R':'-')+'</td>'
-        +'<td class="'+(h&&Math.abs(sel2)>RK.toleransi?(sel2>0?'sisa-low':''):'')+'">'+(h?(sel2>0?'+':'')+fmt(sel2,2)+' R':'-')+'</td>'
-        +'<td><span class="rk-badge '+s.c+'">'+s.t+'</span></td>'
-        +'<td>'+(h?'<button class="danger" data-rk-del-hasil="'+h.id+'" style="color:var(--blue)">Buka Lagi</button> ':'')+'<button class="danger" data-rk-del-ambil="'+a.id+'">Hapus</button></td></tr>'
-        +(h||a.catatan ? '<tr><td colspan="9"><div class="note">'
-          +(h?'<b>Hasil ('+esc(h.admin||'-')+'):</b> '+det+' (total '+fmt(h.totalPcs,0)+' pcs)':'')
-          +(h&&h.alasan?' — <b>Alasan selisih:</b> '+esc(h.alasan):'')
-          +(a.catatan?' — <b>Catatan ambil:</b> '+esc(a.catatan):'')+'</div></td></tr>' : '');
+    var hasilAll=list(DH);
+    var rowsC=ambilAll.map(function(a){
+      var h=hasilAll.find(function(x){return x.ambilId===a.id;}), pcs=h?h.totalPcs:0, s=status(a,pcs,!!h), sel2=pcs-a.totalStd;
+      return '<tr><td>#'+a.no+'</td><td>'+esc(a.tanggal)+'</td><td>'+rinci(a)+'</td><td>'+fmt(a.totalStd,1)+'</td><td>'+(h?fmt(pcs,0):'-')+'</td>'
+        +'<td class="'+(h&&sel2<0?'sisa-low':'')+'">'+(h?(sel2>0?'+':'')+fmt(sel2,1):'-')+'</td><td><span class="rkk-badge '+s.c+'">'+s.t+'</span></td>'
+        +'<td>'+(h?'<button class="danger" data-bukalagi="'+h.id+'" style="color:var(--blue)">Buka Lagi</button> ':'')+'<button class="danger" data-delambil="'+a.id+'">Hapus</button></td></tr>'
+        +(h?'<tr><td colspan="8"><div class="note"><b>'+esc(h.kelompok||'')+':</b> '+h.items.map(function(v){return esc(v.nama)+' '+fmt(v.pcs,0);}).join(' · ')+(h.alasan?' — <b>Alasan:</b> '+esc(h.alasan):'')+'</div></td></tr>':'');
     }).join('');
-    var C = '<div class="card"><h2>3. Rekonsiliasi Selisih R</h2>'
-      +'<div class="sub">Selisih positif = R yang diambil lebih besar dari R yang terpakai (hasil roti kurang dari standar: boros, gagal, atau belum dicatat). Selisih negatif = hasil lebih dari standar.</div>'
-      +'<div class="inline"><div class="field"><label>Toleransi selisih (R)</label><input type="number" min="0" step="any" id="rk-tol" value="'+esc(RK.toleransi)+'" style="width:100px;"></div></div>'
-      +'<table><thead><tr><th>No</th><th>Tanggal</th><th>Admin Gudang</th><th>Kemasan Diambil</th><th>R Diambil</th><th>R Terpakai</th><th>Selisih</th><th>Status</th><th></th></tr></thead>'
-      +'<tbody>'+(rowsC||'<tr><td colspan="9" class="empty">Belum ada pengambilan</td></tr>')+'</tbody></table></div>';
-
-    // --- D. Master varian roti + nilai R kemasan ---
-    var kosong = varian.filter(function(v){ return !(v.standar>0); }).length;
-    var rowsVm = varian.map(function(v){
-      return '<tr><td>'+esc(v.nama)+'</td>'
-        +'<td><input type="text" class="rk-vkel" data-vid="'+v.id+'" value="'+esc(v.kelompok||'')+'" style="width:130px;"></td>'
-        +'<td><input type="number" min="0" step="any" class="rk-std" data-vid="'+v.id+'" value="'+esc(v.standar||'')+'" placeholder="pcs per 1R" style="width:110px;"></td>'
-        +'<td><button class="danger" data-rk-del-varian="'+v.id+'">Hapus</button></td></tr>';
-    }).join('');
-    var rowsR = premix.map(function(it){
-      return '<tr><td><span class="kode-badge">'+esc(it.kode)+'</span> '+esc(it.nama)+'</td>'
-        +'<td><input type="number" min="0" step="any" class="rk-r" data-id="'+it.id+'" value="'+esc(nilaiR(it))+'" style="width:90px;"> R</td></tr>';
-    }).join('');
-    var D = '<div class="card"><h2>4. Master Varian Roti &amp; Standar per 1R</h2>'
-      +'<div class="sub">Tiap varian punya standar pcs per 1R (misal Roti Manis 40, Floshroll 30, Banana Split 28, Pizza Papa 32).'+(kosong>0?' <b class="sisa-low">'+kosong+' varian belum ada standar.</b>':'')+'</div>'
-      +'<div class="inline"><div class="field"><label>Nama Varian</label><input type="text" id="rk-v-nama" placeholder="cth: Abon Cream Cheese"></div>'
-      +'<div class="field"><label>Kelompok</label><input type="text" id="rk-v-kel" placeholder="cth: Manis"></div>'
-      +'<div class="field"><label>Standar pcs per 1R</label><input type="number" min="0" step="any" id="rk-v-std" style="width:110px;"></div>'
-      +'<button type="button" class="primary" id="rk-add-varian">+ Tambah</button></div>'
-      +'<div class="field" style="margin-top:12px;"><label>Tempel banyak sekaligus (satu baris satu varian: <i>Nama ; Kelompok ; Standar</i> atau <i>Nama ; Standar</i>)</label>'
-      +'<textarea id="rk-bulk" rows="4" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-family:inherit;" placeholder="Abon Cream Cheese ; Manis ; 40&#10;Floshroll ; Floshroll ; 30"></textarea></div>'
-      +'<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="primary" id="rk-bulk-simpan">Simpan Daftar Tempel</button>'
-      +'<button type="button" class="primary" id="rk-import-varian">Ambil Nama dari Data Lama</button></div>'
-      +'<div class="note">"Ambil Nama dari Data Lama" menarik nama varian yang sudah ada di app dan mengisi standar saran (hasil per resep ÷ ukuran R). Cek lagi angkanya sebelum dipakai.</div>'
-      +'<table><thead><tr><th>Varian</th><th>Kelompok</th><th>Standar pcs / 1R</th><th></th></tr></thead><tbody>'
-      +(rowsVm||'<tr><td colspan="4" class="empty">Belum ada varian</td></tr>')+'</tbody></table></div>'
-      +'<div class="card"><h2>5. Nilai R per Kemasan Premix</h2>'
-      +'<div class="sub">Otomatis dibaca dari nama (misal "PMX MANIS 5R" = 5 R). Ubah di sini kalau salah.</div>'
-      +'<table><thead><tr><th>Premix</th><th>Nilai R</th></tr></thead><tbody>'+(rowsR||'<tr><td colspan="2" class="empty">Belum ada premix</td></tr>')+'</tbody></table></div>';
-
-    return '<div id="rk-root">'+A+B+C+D+'</div>';
+    var C='<div class="card"><h2>3. Rekonsiliasi</h2><div class="sub">Selisih = Total Jadi − Standar Jadi (negatif = hasil kurang dari standar).</div>'
+      +'<div class="inline"><div class="field"><label>Toleransi (%)</label><input type="number" min="0" step="any" id="rkk-tol" value="'+esc(S.tol)+'" style="width:90px;"></div></div>'
+      +'<table><thead><tr><th>No</th><th>Tanggal</th><th>Kode Diambil</th><th>Standar Jadi</th><th>Total Jadi</th><th>Selisih</th><th>Status</th><th></th></tr></thead><tbody>'
+      +(rowsC||'<tr><td colspan="8" class="empty">Belum ada pengambilan</td></tr>')+'</tbody></table></div>';
+    return '<div id="rkk-root">'+A+B+C+'</div>';
   }
 
-  // ---------- update tampilan hidup ----------
-  function rkUpdateAmbil(){
-    var bar = document.getElementById('rk-ambil-bar'); if(!bar) return;
-    var totalR=0, bagian=[], salah=false, ada=false;
-    items.filter(function(i){ return i.kategori==='premix'; }).forEach(function(it){
-      var q = parseFloat(RK.qty[it.id])||0;
-      var card = document.querySelector('.rk-card[data-id="'+it.id+'"]');
-      var over = q > stokItem(it.id).sisa + 1e-9;
-      if(card) card.className = 'rk-card'+(q>0?(over?' over':' on'):'');
-      if(q>0){ ada=true; totalR += q*nilaiR(it); bagian.push(fmt(q,2)+'× '+esc(it.nama)); if(over) salah=true; }
+  function updAmbil(){
+    var bar=document.getElementById('rkk-bar'); if(!bar) return;
+    var tr=0,ts=0,parts=[],bad=false,ada=false,noStd=false;
+    premixList().forEach(function(it){
+      var q=parseFloat(S.qty[it.id])||0, over=q>stokItem(it.id).sisa+1e-9;
+      var c=document.querySelector('.rkk-card[data-id="'+it.id+'"]'); if(c) c.className='rkk-card'+(q>0?(over?' over':' on'):'');
+      if(q>0){ada=true; tr+=q*nilaiR(it); ts+=q*std(it); parts.push(fmt(q,2)+'× '+esc(it.nama)); if(over)bad=true; if(!(std(it)>0))noStd=true;}
     });
-    bar.innerHTML = '<b>Total adonan: '+fmt(totalR,2)+' R</b>'+(ada?' &nbsp;·&nbsp; '+bagian.join(' + '):' — belum ada kemasan dipilih')
-      +(salah?'<div class="sisa-low" style="margin-top:4px;">Ada kemasan yang jumlahnya melebihi stok (kartu merah).</div>':'');
-    var b = document.getElementById('rk-simpan-ambil'); if(b) b.disabled = !ada || salah;
+    bar.innerHTML='<b>Total adonan: '+fmt(tr,2)+' R · Standar Jadi: '+fmt(ts,1)+'</b>'+(ada?' &nbsp;·&nbsp; '+parts.join(' + '):' — belum ada kode dipilih')
+      +(bad?'<div class="sisa-low">Ada kode melebihi stok (kartu merah).</div>':'')+(noStd?'<div class="sisa-low">Isi standar jadi untuk kode yang dipilih.</div>':'');
+    var b=document.getElementById('rkk-simpan-ambil'); if(b) b.disabled=!ada||bad||noStd;
   }
-  function rkUpdateHasil(){
-    var elD = document.getElementById('rk-h-diambil'); if(!elD) return;
-    var a = list(DS_A).find(function(x){ return x.id===RK.hasilAmbilId; }); if(!a) return;
-    var vmap = {}; list(DS_V).forEach(function(v){ vmap[v.id]=v; });
-    var tp=0, pcsTot=0;
-    document.querySelectorAll('.rk-pcs').forEach(function(inp){
-      var v = vmap[inp.dataset.vid], p = parseFloat(inp.value)||0, r = (v && v.standar>0) ? p/v.standar : 0;
-      tp += r; pcsTot += p;
-      var c = document.querySelector('[data-rv="'+inp.dataset.vid+'"]'); if(c) c.textContent = p>0 ? fmt(r,2)+' R' : '-';
-    });
-    var sel = a.totalR - tp, s = statusRk(a.totalR, tp, pcsTot>0);
-    document.getElementById('rk-h-terpakai').textContent = fmt(tp,2)+' R';
-    document.getElementById('rk-h-selisih').textContent = (sel>0?'+':'')+fmt(sel,2)+' R';
-    var stEl = document.getElementById('rk-h-status'); stEl.innerHTML = '<span class="rk-badge '+s.c+'">'+s.t+'</span>';
-    document.getElementById('rk-h-selbox').className = 'stat '+(pcsTot>0 ? (s.t==='NORMAL'?'pos':'neg') : '');
-    document.getElementById('rk-h-prog').style.width = Math.min(100, a.totalR>0 ? tp/a.totalR*100 : 0)+'%';
-    var box = document.getElementById('rk-alasan-box'); if(box) box.style.display = (pcsTot>0 && s.t!=='NORMAL') ? '' : 'none';
+  function kumpulHasil(){
+    var m={};
+    document.querySelectorAll('.rkk-pcs').forEach(function(i){var p=parseFloat(i.value)||0; if(p>0) m[VN[i.dataset.i]]=(m[VN[i.dataset.i]]||0)+p;});
+    S.extra.forEach(function(e){var n=(e.n||'').trim(),p=parseFloat(e.p)||0; if(n&&p>0) m[n]=(m[n]||0)+p;});
+    return Object.keys(m).map(function(n){return {nama:n,pcs:m[n]};});
+  }
+  function updHasil(){
+    if(!document.getElementById('rkk-h-jadi')) return;
+    var a=list(DA).find(function(x){return x.id===S.pickId;}); if(!a) return;
+    var hs=kumpulHasil(), pcs=hs.reduce(function(s,v){return s+v.pcs;},0), sel=pcs-a.totalStd, s=status(a,pcs,pcs>0);
+    document.getElementById('rkk-h-jadi').textContent=fmt(pcs,0);
+    document.getElementById('rkk-h-sel').textContent=(sel>0?'+':'')+fmt(sel,1)+(a.totalStd>0?' ('+fmt(sel/a.totalStd*100,1)+'%)':'');
+    document.getElementById('rkk-h-st').innerHTML='<span class="rkk-badge '+s.c+'">'+s.t+'</span>';
+    document.getElementById('rkk-h-box').className='stat '+(pcs>0?(s.t==='NORMAL'?'pos':'neg'):'');
+    var bx=document.getElementById('rkk-alasan-box'); if(bx) bx.style.display=(pcs>0&&s.t!=='NORMAL')?'':'none';
   }
 
-  // ---------- aksi ----------
   async function simpanAmbil(){
-    var dipilih = items.filter(function(i){ return i.kategori==='premix' && (parseFloat(RK.qty[i.id])||0)>0; });
-    if(dipilih.length===0){ alert('Pilih minimal satu kemasan premix.'); return; }
-    for(var k=0;k<dipilih.length;k++){
-      if((parseFloat(RK.qty[dipilih[k].id])||0) > stokItem(dipilih[k].id).sisa + 1e-9){ alert('Stok '+dipilih[k].nama+' tidak cukup.'); return; }
+    var dp=premixList().filter(function(i){return (parseFloat(S.qty[i.id])||0)>0;}); if(!dp.length) return;
+    var no=list(DA).reduce(function(m,a){return Math.max(m,a.no||0);},0)+1, tgl=S.tgl||today();
+    var rec={id:uid(),dataset:DA,no:no,tanggal:tgl,admin:S.admin,catatan:S.cat,status:'OPEN',items:[],totalR:0,totalStd:0,waktu:new Date().toISOString()};
+    for(var k=0;k<dp.length;k++){
+      var it=dp[k], q=parseFloat(S.qty[it.id])||0, r=nilaiR(it), sd=std(it);
+      var t=await tambahTrx({tanggal:tgl,itemId:it.id,tipe:'keluar',qty:q,ket:'Ambil Premix #'+no+' (Rekon Kode)'+(S.admin?' - '+S.admin:'')});
+      rec.items.push({itemId:it.id,qty:q,r:r,std:sd,trxId:t?t.id:null}); rec.totalR+=q*r; rec.totalStd+=q*sd;
     }
-    var no = list(DS_A).reduce(function(m,a){ return Math.max(m,a.no||0); },0)+1;
-    var tanggal = RK.tanggal || today();
-    var rec = {id:uid(), dataset:DS_A, no:no, tanggal:tanggal, admin:RK.admin, catatan:RK.catatan, status:'OPEN', items:[], totalR:0, waktu:new Date().toISOString()};
-    for(var i=0;i<dipilih.length;i++){
-      var it = dipilih[i], q = parseFloat(RK.qty[it.id])||0, r = nilaiR(it);
-      var t = await tambahTrx({tanggal:tanggal, itemId:it.id, tipe:'keluar', qty:q, ket:'Ambil Premix #'+no+(RK.admin?' ('+RK.admin+')':'')});
-      rec.items.push({itemId:it.id, qty:q, r:r, trxId:t?t.id:null});
-      rec.totalR += q*r;
-    }
-    riwayatEdit.push(rec);
-    await save('riwayatEdit', riwayatEdit);
-    RK.qty = {}; RK.catatan = ''; RK.hasilAmbilId = rec.id; RK.pcs = {};
+    riwayatEdit.push(rec); await save('riwayatEdit',riwayatEdit);
+    S.qty={}; S.cat=''; S.pickId=rec.id; S.pcs={}; S.kel='';
     renderAll();
   }
   async function simpanHasil(){
-    var a = list(DS_A).find(function(x){ return x.id===RK.hasilAmbilId && x.status==='OPEN'; });
-    if(!a){ alert('Pilih pengambilan dulu.'); return; }
-    var vmap = {}; list(DS_V).forEach(function(v){ vmap[v.id]=v; });
-    var hasilItems=[], tp=0, totalPcs=0;
-    Object.keys(RK.pcs).forEach(function(vid){
-      var p = parseFloat(RK.pcs[vid])||0, v = vmap[vid];
-      if(p>0 && v && v.standar>0){ hasilItems.push({varianId:v.id, nama:v.nama, kelompok:v.kelompok||'', pcs:p, standar:v.standar}); tp += p/v.standar; totalPcs += p; }
-    });
-    if(hasilItems.length===0){ alert('Isi minimal satu varian roti (pcs).'); return; }
-    var s = statusRk(a.totalR, tp, true);
-    var alasan = (RK.hasilAlasan||'').trim();
-    if(s.t!=='NORMAL' && !alasan){ alert('Selisih di luar toleransi ('+s.t+'). Isi alasan selisih dulu.'); var ia=document.getElementById('rk-h-alasan'); if(ia) ia.focus(); return; }
-    var tanggal = RK.hasilTanggal || today();
-    // kelompok dominan (paling banyak pcs) untuk stok roti jadi
-    var perKel = {}; hasilItems.forEach(function(v){ perKel[v.kelompok||'Lainnya'] = (perKel[v.kelompok||'Lainnya']||0)+v.pcs; });
-    var kel = Object.keys(perKel).sort(function(x,y){ return perKel[y]-perKel[x]; })[0];
-    var main = a.items.slice().sort(function(x,y){ return y.r-x.r; })[0];
-    var produksiId = uid();
-    produksi.push({
-      id:produksiId, tanggal:tanggal, premixItemId:main.itemId, resepId:null,
-      resepRincian: a.items.map(function(i){ return {resepQty:i.r, count:i.qty}; }),
-      qtyPremix: a.items.reduce(function(s2,i){ return s2+i.qty; },0), premixDiambil:null,
-      varianHasil: hasilItems.map(function(v){ return {nama:v.nama, jumlah:v.pcs}; }), totalHasil: totalPcs,
-      ket:'Rekon R #'+a.no, labelBatch:'Rekon #'+a.no+' ('+fmt(a.totalR,2)+'R)', kelompok:kel,
-      standarJadi:null, premixSeharusnya:tp, trxId:null, rekonId:a.id
-    });
-    var h = {id:uid(), dataset:DS_H, ambilId:a.id, tanggal:tanggal, admin:RK.hasilAdmin, alasan:alasan,
-      items:hasilItems, totalPcs:totalPcs, rTerpakai:tp, produksiId:produksiId, waktu:new Date().toISOString()};
-    riwayatEdit.push(h);
-    a.status = 'CLOSED';
-    await save('produksi', produksi);
-    await save('riwayatEdit', riwayatEdit);
-    RK.hasilAmbilId = null; RK.pcs = {}; RK.hasilAlasan = '';
+    var a=list(DA).find(function(x){return x.id===S.pickId&&x.status==='OPEN';}); if(!a){alert('Pilih pengambilan dulu.');return;}
+    var hs=kumpulHasil(); if(!hs.length){alert('Isi minimal satu varian roti.');return;}
+    var pcs=hs.reduce(function(s,v){return s+v.pcs;},0), s=status(a,pcs,true), alasan=(S.alasan||'').trim();
+    if(s.t!=='NORMAL'&&!alasan){alert('Selisih di luar toleransi ('+s.t+'). Isi alasan dulu.');return;}
+    var tgl=S.hTgl||today(), kel=(S.kel||'').trim()||'Lainnya';
+    var main=a.items.slice().sort(function(x,y){return y.r-x.r;})[0], pid=uid();
+    produksi.push({id:pid,tanggal:tgl,premixItemId:main.itemId,resepId:null,
+      resepRincian:a.items.map(function(i){return {resepQty:i.r,count:i.qty};}),
+      qtyPremix:a.items.reduce(function(s2,i){return s2+i.qty;},0),premixDiambil:null,
+      varianHasil:hs.map(function(v){return {nama:v.nama,jumlah:v.pcs};}),totalHasil:pcs,
+      ket:'Rekon Kode #'+a.no,labelBatch:'Rekon Kode #'+a.no,kelompok:kel,standarJadi:a.totalStd,premixSeharusnya:null,trxId:null,rekonKodeId:a.id});
+    riwayatEdit.push({id:uid(),dataset:DH,ambilId:a.id,tanggal:tgl,admin:S.hAdmin,alasan:alasan,kelompok:kel,items:hs,totalPcs:pcs,produksiId:pid,waktu:new Date().toISOString()});
+    a.status='CLOSED';
+    await save('produksi',produksi); await save('riwayatEdit',riwayatEdit);
+    S.pickId=null; S.pcs={}; S.extra=[{n:'',p:''},{n:'',p:''},{n:'',p:''}]; S.alasan=''; S.kel='';
     renderAll();
   }
   async function hapusAmbil(id){
-    var a = list(DS_A).find(function(x){ return x.id===id; }); if(!a) return;
-    var h = list(DS_H).find(function(x){ return x.ambilId===id; });
-    if(!confirm('Hapus pengambilan #'+a.no+'?\n\nStok premix dikembalikan'+(h?' dan hasil roti yang sudah dicatat ikut dihapus (cek stok roti jadi / packing).':'.'))) return;
-    var tids = a.items.map(function(i){ return i.trxId; }).filter(Boolean);
-    trx = trx.filter(function(t){ return tids.indexOf(t.id)<0; });
-    if(h) produksi = produksi.filter(function(p){ return p.id!==h.produksiId; });
-    riwayatEdit = riwayatEdit.filter(function(r){ return r.id!==a.id && !(h && r.id===h.id); });
-    await save('trx', trx); if(h) await save('produksi', produksi); await save('riwayatEdit', riwayatEdit);
-    if(RK.hasilAmbilId===id) RK.hasilAmbilId=null;
-    renderAll();
+    var a=list(DA).find(function(x){return x.id===id;}); if(!a) return;
+    var h=list(DH).find(function(x){return x.ambilId===id;});
+    if(!confirm('Hapus pengambilan #'+a.no+'? Stok premix dikembalikan'+(h?' dan hasil roti yang tercatat ikut dihapus.':'.'))) return;
+    var tids=a.items.map(function(i){return i.trxId;}).filter(Boolean);
+    trx=trx.filter(function(t){return tids.indexOf(t.id)<0;});
+    if(h) produksi=produksi.filter(function(p){return p.id!==h.produksiId;});
+    riwayatEdit=riwayatEdit.filter(function(r){return r.id!==a.id&&!(h&&r.id===h.id);});
+    await save('trx',trx); if(h) await save('produksi',produksi); await save('riwayatEdit',riwayatEdit);
+    if(S.pickId===id) S.pickId=null; renderAll();
   }
   async function bukaLagi(hid){
-    var h = list(DS_H).find(function(x){ return x.id===hid; }); if(!h) return;
-    if(!confirm('Buka lagi pengambilan ini? Hasil roti yang sudah dicatat dihapus dari Produksi (cek stok roti jadi / packing), lalu bisa diisi ulang.')) return;
-    var a = list(DS_A).find(function(x){ return x.id===h.ambilId; });
-    produksi = produksi.filter(function(p){ return p.id!==h.produksiId; });
-    riwayatEdit = riwayatEdit.filter(function(r){ return r.id!==h.id; });
-    if(a) a.status = 'OPEN';
-    await save('produksi', produksi); await save('riwayatEdit', riwayatEdit);
-    renderAll();
-  }
-  async function tambahVarian(nama, kel, std){
-    nama = (nama||'').trim(); if(!nama) return false;
-    var ada = list(DS_V).find(function(v){ return v.nama.toLowerCase()===nama.toLowerCase(); });
-    if(ada){ if(std>0) ada.standar = std; if(kel) ada.kelompok = kel; }
-    else riwayatEdit.push({id:uid(), dataset:DS_V, nama:nama, kelompok:kel||'Lainnya', standar:std||0, waktu:new Date().toISOString()});
-    return true;
+    var h=list(DH).find(function(x){return x.id===hid;}); if(!h) return;
+    if(!confirm('Buka lagi? Hasil roti yang sudah dicatat dihapus dari Produksi, lalu bisa diisi ulang.')) return;
+    var a=list(DA).find(function(x){return x.id===h.ambilId;});
+    produksi=produksi.filter(function(p){return p.id!==h.produksiId;});
+    riwayatEdit=riwayatEdit.filter(function(r){return r.id!==h.id;});
+    if(a) a.status='OPEN';
+    await save('produksi',produksi); await save('riwayatEdit',riwayatEdit); renderAll();
   }
 
-  // ---------- pasang event ----------
-  function attachRekon(){
-    var root = document.getElementById('rk-root'); if(!root) return;
-    rkUpdateAmbil(); rkUpdateHasil();
-
-    function setQty(id, v){
-      v = Math.max(0, Math.round(v*1000)/1000);
-      RK.qty[id] = v>0 ? v : '';
-      var inp = root.querySelector('.rk-qty[data-id="'+id+'"]'); if(inp) inp.value = RK.qty[id];
-      rkUpdateAmbil();
-    }
-    root.addEventListener('click', async function(e){
-      var b = e.target.closest('button'); if(!b || !root.contains(b)) return;
-      var d = b.dataset;
-      if(d.rkPlus){ setQty(d.rkPlus, (parseFloat(RK.qty[d.rkPlus])||0)+1); }
-      else if(d.rkMinus){ setQty(d.rkMinus, (parseFloat(RK.qty[d.rkMinus])||0)-1); }
-      else if(d.rkPick){ RK.hasilAmbilId = d.rkPick; RK.pcs = {}; RK.hasilAlasan=''; renderAll(); }
-      else if(d.rkDelAmbil){ await hapusAmbil(d.rkDelAmbil); }
-      else if(d.rkDelHasil){ await bukaLagi(d.rkDelHasil); }
-      else if(d.rkDelVarian){
-        if(!confirm('Hapus varian ini dari master?')) return;
-        riwayatEdit = riwayatEdit.filter(function(r){ return r.id!==d.rkDelVarian; });
-        await save('riwayatEdit', riwayatEdit); renderAll();
-      }
-      else if(b.id==='rk-simpan-ambil'){ b.disabled=true; await simpanAmbil(); }
-      else if(b.id==='rk-simpan-hasil'){ b.disabled=true; await simpanHasil(); b.disabled=false; }
-      else if(b.id==='rk-add-varian'){
-        var n=document.getElementById('rk-v-nama').value, k=document.getElementById('rk-v-kel').value.trim(), s=parseFloat(document.getElementById('rk-v-std').value)||0;
-        if(!(n||'').trim()){ alert('Isi nama varian.'); return; }
-        await tambahVarian(n, k, s); await save('riwayatEdit', riwayatEdit); renderAll();
-      }
-      else if(b.id==='rk-bulk-simpan'){
-        var rows = parseBulk(document.getElementById('rk-bulk').value, document.getElementById('rk-v-kel').value.trim());
-        if(rows.length===0){ alert('Tidak ada baris yang terbaca.'); return; }
-        for(var i=0;i<rows.length;i++) await tambahVarian(rows[i].nama, rows[i].kel, rows[i].std);
-        await save('riwayatEdit', riwayatEdit); renderAll();
-      }
-      else if(b.id==='rk-import-varian'){
-        var saran = sarankanStandar(), nama = {};
-        semuaVarianNama().forEach(function(n){ nama[n]=''; });
-        items.filter(function(i){ return i.kategori==='premix'; }).forEach(function(it){
-          var kel = String(it.nama||'').replace(/\bPMX\b/ig,'').replace(/\d+(?:[.,]\d+)?\s*R\b/ig,'').replace(/\s+/g,' ').trim();
-          (it.varianMaster||[]).forEach(function(n){ if(!(n in nama) || !nama[n]) nama[n]=kel; });
-          (it.resepList||[]).forEach(function(rs){ (rs.varian||[]).forEach(function(v){ if(!(v.nama in nama) || !nama[v.nama]) nama[v.nama]=kel; }); });
-        });
-        var tambah=0;
-        for(var nm in nama){
-          if(!list(DS_V).find(function(v){ return v.nama.toLowerCase()===nm.toLowerCase(); })){ await tambahVarian(nm, nama[nm]||'Lainnya', saran[nm]||0); tambah++; }
-        }
-        if(tambah===0){ alert('Tidak ada nama varian baru.'); return; }
-        await save('riwayatEdit', riwayatEdit); renderAll();
-        alert(tambah+' varian ditambahkan. Cek dan lengkapi kolom standar di tabel master.');
-      }
+  function attach(){
+    var root=document.getElementById('rkk-root'); if(!root) return;
+    updAmbil(); updHasil();
+    function setQty(id,v){v=Math.max(0,Math.round(v*1000)/1000); S.qty[id]=v>0?v:''; var i=root.querySelector('.rkk-qty[data-id="'+id+'"]'); if(i) i.value=S.qty[id]; updAmbil();}
+    root.addEventListener('click',async function(e){
+      var b=e.target.closest('button'); if(!b||!root.contains(b)) return; var d=b.dataset;
+      if(d.plus) setQty(d.plus,(parseFloat(S.qty[d.plus])||0)+1);
+      else if(d.minus) setQty(d.minus,(parseFloat(S.qty[d.minus])||0)-1);
+      else if(d.pick){S.pickId=d.pick;S.pcs={};S.alasan='';S.kel='';renderAll();}
+      else if(d.delambil) await hapusAmbil(d.delambil);
+      else if(d.bukalagi) await bukaLagi(d.bukalagi);
+      else if(b.id==='rkk-simpan-ambil'){b.disabled=true; await simpanAmbil();}
+      else if(b.id==='rkk-simpan-hasil'){b.disabled=true; await simpanHasil(); b.disabled=false;}
     });
-    root.addEventListener('input', function(e){
-      var el = e.target;
-      if(el.classList.contains('rk-qty')){ RK.qty[el.dataset.id] = el.value; rkUpdateAmbil(); }
-      else if(el.classList.contains('rk-pcs')){ RK.pcs[el.dataset.vid] = el.value; rkUpdateHasil(); }
-      else if(el.id==='rk-tgl') RK.tanggal = el.value;
-      else if(el.id==='rk-admin'){ RK.admin = el.value; try{ localStorage.setItem('rk_admin_gudang', el.value); }catch(x){} }
-      else if(el.id==='rk-cat') RK.catatan = el.value;
-      else if(el.id==='rk-h-tgl') RK.hasilTanggal = el.value;
-      else if(el.id==='rk-h-admin'){ RK.hasilAdmin = el.value; try{ localStorage.setItem('rk_admin_packing', el.value); }catch(x){} }
-      else if(el.id==='rk-h-alasan') RK.hasilAlasan = el.value;
-      else if(el.id==='rk-cari-pm'){
-        var t = el.value.trim().toLowerCase();
-        root.querySelectorAll('.rk-card').forEach(function(c){ c.style.display = (!t || c.dataset.text.indexOf(t)>=0) ? '' : 'none'; });
-      }
-      else if(el.id==='rk-cari-v'){
-        var t2 = el.value.trim().toLowerCase();
-        root.querySelectorAll('.rk-vrow').forEach(function(r){ r.style.display = (!t2 || r.dataset.nama.indexOf(t2)>=0) ? '' : 'none'; });
-      }
+    root.addEventListener('input',function(e){
+      var el=e.target, c=el.classList;
+      if(c.contains('rkk-qty')){S.qty[el.dataset.id]=el.value; updAmbil();}
+      else if(c.contains('rkk-pcs')){S.pcs[VN[el.dataset.i]]=el.value; updHasil();}
+      else if(c.contains('rkk-exn')){S.extra[el.dataset.i].n=el.value; updHasil();}
+      else if(c.contains('rkk-exp')){S.extra[el.dataset.i].p=el.value; updHasil();}
+      else if(el.id==='rkk-tgl') S.tgl=el.value;
+      else if(el.id==='rkk-admin'){S.admin=el.value; try{localStorage.setItem('rkk_admin_g',el.value);}catch(x){}}
+      else if(el.id==='rkk-cat') S.cat=el.value;
+      else if(el.id==='rkk-htgl') S.hTgl=el.value;
+      else if(el.id==='rkk-hadmin'){S.hAdmin=el.value; try{localStorage.setItem('rkk_admin_p',el.value);}catch(x){}}
+      else if(el.id==='rkk-kel') S.kel=el.value;
+      else if(el.id==='rkk-alasan') S.alasan=el.value;
+      else if(el.id==='rkk-cari'){var t=el.value.trim().toLowerCase(); root.querySelectorAll('.rkk-vrow').forEach(function(r){r.style.display=(!t||r.dataset.n.indexOf(t)>=0)?'':'none';});}
     });
-    root.addEventListener('change', async function(e){
-      var el = e.target;
-      if(el.id==='rk-tol'){
-        var v = parseFloat(el.value); RK.toleransi = v>=0 ? v : 0.5;
-        try{ localStorage.setItem('rk_toleransi', String(RK.toleransi)); }catch(x){}
-        renderAll();
-      }
-      else if(el.classList.contains('rk-std') || el.classList.contains('rk-vkel')){
-        var rec = list(DS_V).find(function(r){ return r.id===el.dataset.vid; }); if(!rec) return;
-        if(el.classList.contains('rk-std')) rec.standar = parseFloat(el.value)||0; else rec.kelompok = el.value.trim();
-        await save('riwayatEdit', riwayatEdit); renderAll();
-      }
-      else if(el.classList.contains('rk-r')){
-        var it = itemById(el.dataset.id); if(!it) return;
-        var r = parseFloat(el.value); it.nilaiR = r>0 ? r : undefined;
-        await save('items', items); renderAll();
+    root.addEventListener('change',async function(e){
+      var el=e.target;
+      if(el.classList.contains('rkk-std')){
+        var it=itemById(el.dataset.id); if(!it) return;
+        var v=parseFloat(el.value); it.standarHasil=v>0?v:undefined;
+        await save('items',items); renderAll();
+      } else if(el.id==='rkk-tol'){
+        var t=parseFloat(el.value); S.tol=t>=0?t:5; try{localStorage.setItem('rkk_tol',String(S.tol));}catch(x){} renderAll();
       }
     });
   }
 
-  // ---------- pasang tab & renderAll ----------
-  if(!TABS.some(function(t){ return t.id==='rekon'; })){
-    TABS.push({id:'rekon', label:'Rekon R', badge:function(){ return list(DS_A).filter(function(a){ return a.status==='OPEN'; }).length; }});
+  if(!TABS.some(function(t){return t.id==='rekonkode';})){
+    TABS.push({id:'rekonkode',label:'Rekon Kode',badge:function(){return list(DA).filter(function(a){return a.status==='OPEN';}).length;}});
   }
-  var _renderAsli = renderAll;
-  renderAll = function(){
-    if(activeTab==='rekon'){
-      renderNav();
-      document.getElementById('main').innerHTML = viewRekon();
-      attachRekon();
-      return;
-    }
-    _renderAsli();
+  var _asli=renderAll;
+  renderAll=function(){
+    if(activeTab==='rekonkode'){renderNav(); document.getElementById('main').innerHTML=view(); attach(); return;}
+    _asli();
   };
   renderAll();
 
-  // ---------- pengaman: produksi hasil Rekon R tidak boleh diedit/dihapus dari tab Produksi ----------
-  window.addEventListener('click', function(e){
-    var btn = e.target && e.target.closest ? e.target.closest('button') : null; if(!btn) return;
-    var id = btn.getAttribute('data-del-produksi') || btn.getAttribute('data-edit-produksi') || btn.getAttribute('data-save-edit-produksi');
-    if(!id) return;
-    var p = produksi.find(function(x){ return x.id===id; });
-    if(p && p.rekonId){
-      e.stopImmediatePropagation(); e.preventDefault();
-      alert('Produksi ini berasal dari tab "Rekon R". Ubah atau hapus lewat tab Rekon R (tombol "Buka Lagi" atau "Hapus" di tabel Rekonsiliasi).');
-    }
-  }, true);
+  window.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
+    var id=b.getAttribute('data-del-produksi')||b.getAttribute('data-edit-produksi')||b.getAttribute('data-save-edit-produksi'); if(!id) return;
+    var p=produksi.find(function(x){return x.id===id;});
+    if(p&&p.rekonKodeId){e.stopImmediatePropagation();e.preventDefault();alert('Produksi ini berasal dari tab Rekon Kode. Ubah/hapus lewat tab Rekon Kode (Buka Lagi / Hapus).');}
+  },true);
 })();
 </script>
+
