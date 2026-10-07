@@ -4488,6 +4488,7 @@ subscribeRealtime = function(){
     renderAll();
   }
 
+  // Hapus / edit produksi gabungan: kembalikan stok SEMUA kode yang terpotong
   window.addEventListener('click',async function(e){
     var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
     var del=b.getAttribute('data-del-produksi');
