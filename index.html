@@ -4251,440 +4251,259 @@ subscribeRealtime = function(){
 </script>
 <script>
 // =====================================================================
-// TAB "REKON KODE": Pengambilan Premix Multi-Kode & Auto-Deduct Kemasan (BOM)
-// Perbaikan:
-//  - Rasio kemasan kosong tidak lagi dianggap 1 (dilewati)
-//  - Satu varian = satu kemasan (OPP atau Kardus). Jika terdaftar di >1 kemasan,
-//    kemasan tidak dipotong dan muncul peringatan
-//  - Pratinjau "Kemasan yang akan dipotong" sebelum simpan + saklar potong otomatis
-//  - Rincian kemasan yang terpotong disimpan & tampil di tabel Rekonsiliasi
-//  - Kartu premix menandai standar yang masih tebakan otomatis
-//  - OPSI B: isi 'Premix dipakai (R)' per varian; standar dihitung dari
-//    SUM(R dipakai x standar pcs per R varian itu). Kosongkan semua = pakai standar total
+// PRODUKSI GABUNGAN — pengganti kartu "Catat Produksi: Banyak Premix / Ukuran Sekaligus"
+//
+// Cara pasang: tempel SELURUH isi file ini sebagai blok <script> BARU di paling bawah
+// index.html (setelah blok script "REKON KODE"), sebelum </body>. Tidak ada kode lama
+// yang perlu dihapus atau diubah.
+//
+// Yang dilakukan:
+//  - Pilih beberapa kode premix sekaligus (misal Manis 1R, 3R, 5R). Stok TIAP KODE
+//    berkurang sendiri-sendiri.
+//  - Standar jadi = Σ (standar pcs resep kode itu × jumlah paket). Tidak ada lagi
+//    "premix utama" atau "setara resep".
+//  - Hasil diisi PER VARIAN roti, dijumlahkan jadi SATU hasil produksi (satu catatan,
+//    satu stok), lalu dicek terhadap total standar (Selisih dalam pcs).
+//  - Tersimpan ke array `produksi` dengan format yang sama seperti produksi biasa
+//    (varianHasil per varian), jadi tab Packing/Laporan tetap membaca per varian.
 // =====================================================================
 (function(){
-  var DA='rkk_ambil', DH='rkk_hasil', DV='rkk_stdv';
-  var S={qty:{}, tgl:'', admin:'', cat:'', pickId:null, pcs:{}, extra:[{n:'',p:'',r:''},{n:'',p:'',r:''},{n:'',p:'',r:''}], rr:{}, hTgl:'', hAdmin:'', alasan:'', kel:'', tol:5, potong:true};
-  try{
-    var t=parseFloat(localStorage.getItem('rkk_tol')); if(t>=0) S.tol=t;
-    S.admin=localStorage.getItem('rkk_admin_g')||''; S.hAdmin=localStorage.getItem('rkk_admin_p')||'';
-  }catch(e){}
+  var S={rows:[{itemId:'',resepId:'',paket:1}], v:{}, ex:[{n:'',p:''},{n:'',p:''},{n:'',p:''}], kel:'', ket:'', tgl:'', alasan:''};
   var VN=[];
-
-  var st=document.createElement('style');
-  st.textContent=
-   '.rkk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin:10px 0;}'
-  +'.rkk-card{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--cream);}'
-  +'.rkk-card.on{border-color:var(--amber);background:#fff4d6;}.rkk-card.over{border-color:var(--red);background:#f5dad3;}'
-  +'.rkk-step{display:flex;align-items:center;gap:6px;margin-top:8px;}'
-  +'.rkk-step button{width:40px;height:40px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:22px;font-weight:700;cursor:pointer;color:var(--brown);}'
-  +'.rkk-step input{width:70px;height:40px;text-align:center;font-size:16px;border:1px solid var(--line);border-radius:8px;}'
-  +'.rkk-sticky{position:sticky;top:0;z-index:20;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0;box-shadow:0 2px 6px rgba(0,0,0,.1);}'
-  +'.rkk-badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}'
-  +'.rkk-ok{background:#dceae2;color:#2e6e62}.rkk-warn{background:#fbecc8;color:#8a5a16}.rkk-bad{background:#f5dad3;color:#b4442e}.rkk-gray{background:#eee;color:#666}'
-  +'.rkk-pick{cursor:pointer;border:2px solid var(--line);border-radius:10px;padding:10px;background:#fff;text-align:left;font-family:inherit;color:var(--brown);font-size:13px;}'
-  +'.rkk-pick.on{border-color:var(--amber);background:#fff4d6;}';
-  document.head.appendChild(st);
+  var MAXROW=6;
 
   function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
   function fmt(n,d){return (n||0).toLocaleString('id-ID',{maximumFractionDigits:d==null?2:d});}
-  function list(ds){return riwayatEdit.filter(function(r){return r.dataset===ds;});}
-  function nilaiR(it){var v=parseFloat(it&&it.nilaiR); if(v>0) return v; var m=String((it&&it.nama)||'').match(/(\d+(?:[.,]\d+)?)\s*R\b/i); return m?(parseFloat(m[1].replace(',','.'))||1):1;}
+  function tol(){var t=NaN; try{t=parseFloat(localStorage.getItem('rkk_tol'));}catch(e){} return t>=0?t:5;}
+  function premixItems(){return items.filter(function(i){return i.kategori==='premix';});}
+  function resepOf(r){var it=r.itemId?itemById(r.itemId):null; return it?(it.resepList||[]).find(function(x){return x.id===r.resepId;}):null;}
+  function paketOf(r){return parseFloat(r.paket)||0;}
+  function stdRow(r){var rs=resepOf(r); return rs?standarProfilTotal(rs)*paketOf(r):0;}
+  function qtyR(r){var rs=resepOf(r); return rs?rs.resepQty*paketOf(r):0;}
+  function qtyKeluar(r){var rs=resepOf(r),p=paketOf(r); return rs?(rs.premixKg>0?rs.premixKg*p:rs.resepQty*p):0;}
+  function aktif(){return S.rows.filter(function(r){return r.itemId&&r.resepId&&paketOf(r)>0&&resepOf(r);});}
 
-  function modeStd(it){
-    var vals=[]; (it.resepList||[]).forEach(function(r){var v=(r.varian||[])[0]; if(!v)return;
-      var mn=Number(v.min)||0, mx=(v.max!=null&&v.max!=='')?Number(v.max):mn, a=(mn+mx)/2; if(a>0) vals.push(a);});
-    if(!vals.length) return 0;
-    var c={},best=0,bc=0; vals.forEach(function(s){c[s]=(c[s]||0)+1;});
-    Object.keys(c).forEach(function(k){var n=c[k],s=parseFloat(k); if(n>bc||(n===bc&&s>best)){bc=n;best=s;}});
-    return best;
-  }
-  function std(it){var v=parseFloat(it.standarHasil); return v>0?v:modeStd(it);}
-  function stdTebakan(it){return !(parseFloat(it.standarHasil)>0);}
-  function premixList(){return items.filter(function(i){return i.kategori==='premix';});}
-
-  function kelDefault(its){
-    var b=its.slice().sort(function(a,c){return nilaiR(c)-nilaiR(a);})[0]; if(!b) return '';
-    var n=String(b.nama||'').replace(/\bPMX\b/ig,'').replace(/\d+(?:[.,]\d+)?\s*R\b/ig,'').replace(/\s+/g,' ').trim();
-    return n||b.nama;
-  }
-
-  function namaVarian(){
-    var set={};
-    semuaVarianNama().forEach(function(n){set[n]=1;});
-    items.forEach(function(it){(it.varianMaster||[]).forEach(function(n){set[n]=1;}); (it.resepList||[]).forEach(function(r){(r.varian||[]).forEach(function(v){set[v.nama]=1;});});});
-    return Object.keys(set).sort();
-  }
-
-  // ---------------------------------------------------------------
-  // BOM KEMASAN PER VARIAN
-  // Rasio kosong/0 dilewati (tidak ditebak 1).
-  // ---------------------------------------------------------------
-  function dapatkanBomKemasan(namaVarianRoti){
-    var kemasanList=[];
-    var target=String(namaVarianRoti||'').trim().toLowerCase();
-    items.forEach(function(it){
-      if(it.kategori!=='kemasan' && it.kategori!=='packing') return;
-      (it.resepList||[]).forEach(function(r){
-        (r.varian||[]).forEach(function(v){
-          if(String(v.nama||'').trim().toLowerCase()!==target) return;
-          var rasio=parseFloat(v.qtyKemasan);
-          if(!(rasio>0)) return;
-          kemasanList.push({itemId:it.id,namaItem:it.nama,rasio:rasio});
-        });
-      });
+  function varianNames(){
+    var set={},out=[];
+    S.rows.forEach(function(r){
+      var it=r.itemId?itemById(r.itemId):null; if(!it) return;
+      (it.varianMaster||[]).forEach(function(n){set[n]=1;});
+      (it.resepList||[]).forEach(function(rs){(rs.varian||[]).forEach(function(v){if(v&&v.nama) set[v.nama]=1;});});
     });
-    return kemasanList;
+    Object.keys(set).sort().forEach(function(n){out.push(n);});
+    return out;
   }
-  // Satu varian = satu kemasan. Kalau cocok >1 kemasan -> ambigu, tidak dipotong.
-  function bomTunggal(nama){
-    var l=dapatkanBomKemasan(nama);
-    return {list:l.length===1?l:[], ambigu:l.length>1, kandidat:l};
-  }
-
-  function status(a,pcs,ada,stdT){
-    if(!ada) return {t:'BELUM ADA HASIL',c:'rkk-gray'};
-    var T=(stdT==null?a.totalStd:stdT);
-    var sel=pcs-T, tol=T*S.tol/100;
-    if(Math.abs(sel)<=tol) return {t:'NORMAL',c:'rkk-ok'};
-    return sel<0?{t:'HASIL KURANG',c:'rkk-bad'}:{t:'HASIL LEBIH',c:'rkk-warn'};
-  }
-
-  // Standar pcs per 1 R per varian (disimpan di riwayatEdit, ikut sinkron)
-  function stdVget(n){var k=String(n||'').trim().toLowerCase(); var r=list(DV).find(function(x){return x.key===k;}); return r?(parseFloat(r.std)||0):0;}
-  async function stdVset(n,v){
-    var k=String(n||'').trim().toLowerCase(); if(!k) return;
-    var r=list(DV).find(function(x){return x.key===k;});
-    if(v>0){ if(r) r.std=v; else riwayatEdit.push({id:uid(),dataset:DV,key:k,nama:n,std:v}); }
-    else if(r){ riwayatEdit=riwayatEdit.filter(function(x){return x!==r;}); }
-    await save('riwayatEdit',riwayatEdit);
-  }
-  // Hitung standar total. Mode B jika ada varian yang diisi 'R dipakai', selain itu mode A.
-  function hitungStd(a,hs){
-    var pakai=hs.reduce(function(s,v){return s+(v.r>0?v.r:0);},0);
-    if(!(pakai>0)) return {total:a.totalStd,mode:'A',pakai:0,sisa:0};
-    var avg=a.totalR>0?a.totalStd/a.totalR:0, tot=0;
-    hs.forEach(function(v){ if(v.r>0) tot+=v.r*(stdVget(v.nama)||avg); });
-    var sisa=a.totalR-pakai; if(sisa>0) tot+=sisa*avg;
-    return {total:tot,mode:'B',pakai:pakai,sisa:sisa};
-  }
-
-  function rinci(a){return (a.items||[]).map(function(i){var it=itemById(i.itemId);return esc(it?it.nama:'(dihapus)')+' ×'+fmt(i.qty,2);}).join(' + ');}
-
-  function view(){
-    var pm=premixList(), ambilAll=list(DA).sort(function(a,b){return (b.no||0)-(a.no||0);});
-    var open=ambilAll.filter(function(a){return a.status==='OPEN';});
-    var sel=S.pickId?open.find(function(a){return a.id===S.pickId;}):null; if(!sel) S.pickId=null;
-    if(!S.tgl) S.tgl=today(); if(!S.hTgl) S.hTgl=today();
-
-    var cards=pm.map(function(it){
-      var q=S.qty[it.id]||'', sd=std(it);
-      return '<div class="rkk-card" data-id="'+it.id+'"><div class="kode-badge" style="display:inline-block;">'+esc(it.kode)+'</div> <b>'+esc(it.nama)+'</b>'
-        +'<div class="note" style="margin:3px 0;">'+fmt(nilaiR(it),2)+' R · stok <b>'+fmt(stokItem(it.id).sisa,2)+'</b> '+esc(it.satuan)+'</div>'
-        +'<div class="field"><label>Standar jadi per kemasan ('+esc(satuanHasilItem(it))+')</label><input type="number" min="0" step="any" class="rkk-std" data-id="'+it.id+'" value="'+esc(sd||'')+'" placeholder="isi standar"></div>'
-        +(stdTebakan(it)&&sd>0?'<div class="sisa-low" style="font-size:11px;">Standar ini tebakan otomatis. Ketik angka yang benar lalu keluar dari kolom agar tersimpan.</div>':'')
-        +'<div class="rkk-step"><button type="button" data-minus="'+it.id+'">−</button><input type="number" min="0" step="any" class="rkk-qty" data-id="'+it.id+'" value="'+esc(q)+'" placeholder="0"><button type="button" data-plus="'+it.id+'">+</button></div></div>';
-    }).join('');
-
-    var A='<div class="card"><h2>1. Admin Gudang — Ambil Premix (boleh beberapa kode sekaligus)</h2>'
-      +'<div class="sub">Tekan + pada tiap kode yang diambil (misal 1R, 3R, 5R). Stok tiap kode dipotong sendiri-sendiri. <b>Standar jadi diisi per kode</b> (tidak harus lurus), dan total standar dijumlahkan otomatis.</div>'
-      +(pm.length===0?'<div class="empty">Belum ada barang kategori Premix di tab Kode</div>':
-       '<div class="inline"><div class="field"><label>Tanggal</label><input type="date" id="rkk-tgl" value="'+esc(S.tgl)+'"></div>'
-       +'<div class="field"><label>Nama Admin Gudang</label><input type="text" id="rkk-admin" value="'+esc(S.admin)+'"></div></div>'
-       +'<div class="rkk-grid">'+cards+'</div><div class="rkk-sticky" id="rkk-bar"></div>'
-       +'<div class="inline"><div class="field" style="flex:1;"><label>Catatan (opsional)</label><input type="text" id="rkk-cat" value="'+esc(S.cat)+'" style="width:100%;"></div>'
-       +'<button type="button" class="primary" id="rkk-simpan-ambil">Simpan Pengambilan</button></div>')+'</div>';
-
-    var picks=open.map(function(a){return '<button type="button" class="rkk-pick'+(sel&&sel.id===a.id?' on':'')+'" data-pick="'+a.id+'"><b>#'+a.no+'</b> · '+esc(a.tanggal)+' · standar <b>'+fmt(a.totalStd,1)+'</b> · '+fmt(a.totalR,2)+' R<div class="note" style="margin:3px 0 0 0;">'+rinci(a)+'</div></button>';}).join('');
-    var B='<div class="card"><h2>2. Admin Packing — Catat Hasil Roti & Auto Potong Kemasan</h2><div class="sub">Pilih pengambilan, isi pcs tiap varian. Hasil disimpan <b>per varian</b>. Kemasan (OPP atau Kardus) dipotong sesuai varian, satu varian satu kemasan.</div>'
-      +(open.length===0?'<div class="empty">Tidak ada pengambilan yang menunggu hasil.</div>':'<div class="rkk-grid">'+picks+'</div>');
-    if(sel){
-      VN=namaVarian(); if(!S.kel) S.kel=kelDefault(sel.items.map(function(i){return itemById(i.itemId);}).filter(Boolean));
-      var avgR=sel.totalR>0?sel.totalStd/sel.totalR:0;
-      var rows=VN.map(function(n,i){return '<tr class="rkk-vrow" data-n="'+esc(n.toLowerCase())+'"><td>'+esc(n)+'</td><td><input type="number" min="0" step="any" class="rkk-pcs" data-i="'+i+'" value="'+esc(S.pcs[n]==null?'':S.pcs[n])+'" placeholder="pcs" style="width:110px;"></td><td><input type="number" min="0" step="any" class="rkk-rpk" data-i="'+i+'" value="'+esc(S.rr[n]==null?'':S.rr[n])+'" placeholder="R" style="width:80px;"></td><td><input type="number" min="0" step="any" class="rkk-sv" data-i="'+i+'" value="'+esc(stdVget(n)||'')+'" placeholder="'+esc(avgR?fmt(avgR,1):'pcs/R')+'" style="width:90px;"></td></tr>';}).join('');
-      var ex=S.extra.map(function(e,i){return '<tr><td><input type="text" class="rkk-exn" data-i="'+i+'" value="'+esc(e.n)+'" placeholder="varian baru (ketik nama)" style="width:210px;"></td><td><input type="number" min="0" step="any" class="rkk-exp" data-i="'+i+'" value="'+esc(e.p)+'" placeholder="pcs" style="width:110px;"></td><td><input type="number" min="0" step="any" class="rkk-exr" data-i="'+i+'" value="'+esc(e.r||'')+'" placeholder="R" style="width:80px;"></td><td></td></tr>';}).join('');
-      B+='<div class="rkk-sticky"><div class="grid">'
-        +'<div class="stat"><div class="label">Standar Jadi (tetap)</div><div class="value" id="rkk-h-std">'+fmt(sel.totalStd,1)+'</div></div>'
-        +'<div class="stat"><div class="label">Total Jadi (aktual)</div><div class="value" id="rkk-h-jadi">0</div></div>'
-        +'<div class="stat" id="rkk-h-box"><div class="label">Selisih</div><div class="value" id="rkk-h-sel">0</div></div>'
-        +'<div class="stat"><div class="label">Status</div><div class="value" id="rkk-h-st" style="font-size:14px;">-</div></div></div></div>'
-        +'<div class="inline"><div class="field"><label>Cari varian</label><input type="text" id="rkk-cari" placeholder="ketik nama roti"></div>'
-        +'<div class="field"><label>Nama hasil jadi (kelompok di stok)</label><input type="text" id="rkk-kel" value="'+esc(S.kel)+'"></div>'
-        +'<div class="field"><label>Tanggal</label><input type="date" id="rkk-htgl" value="'+esc(S.hTgl)+'"></div>'
-        +'<div class="field"><label>Nama Admin Packing</label><input type="text" id="rkk-hadmin" value="'+esc(S.hAdmin)+'"></div></div>'
-        +'<div class="note" style="margin-top:8px;">Kalau satu adonan dipakai untuk beberapa jenis roti, isi <b>Premix dipakai (R)</b> tiap varian. Standar dihitung dari R dipakai × standar pcs per R varian itu (isi sekali, tersimpan). Kosongkan semua kolom R untuk memakai standar total biasa.</div>'
-        +'<table><thead><tr><th>Varian Roti</th><th>Hasil (pcs/box)</th><th>Premix dipakai (R)</th><th>Standar pcs per R</th></tr></thead><tbody>'+rows+ex+'</tbody></table>'
-        +'<div class="note" id="rkk-alok" style="margin-top:6px;"></div>'
-        +'<label style="display:block;margin-top:10px;"><input type="checkbox" id="rkk-potong"'+(S.potong===false?'':' checked')+'> Potong kemasan (OPP/Kardus) otomatis saat simpan</label>'
-        +'<div class="note" id="rkk-kemasan-prev" style="margin-top:6px;"></div>'
-        +'<div class="field" id="rkk-alasan-box" style="display:none;margin-top:10px;"><label>Alasan selisih (wajib, karena di luar toleransi)</label><input type="text" id="rkk-alasan" value="'+esc(S.alasan)+'" style="width:100%;"></div>'
-        +'<div style="margin-top:10px;"><button type="button" class="primary" id="rkk-simpan-hasil">Simpan &amp; Tutup Pengambilan #'+sel.no+'</button></div>';
-    }
-    B+='</div>';
-
-    var hasilAll=list(DH);
-    var rowsC=ambilAll.map(function(a){
-      var h=hasilAll.find(function(x){return x.ambilId===a.id;}), pcs=h?h.totalPcs:0, T=(h&&h.standarPakai!=null)?h.standarPakai:a.totalStd, s=status(a,pcs,!!h,T), sel2=pcs-T;
-      return '<tr><td>#'+a.no+'</td><td>'+esc(a.tanggal)+'</td><td>'+rinci(a)+'</td><td>'+fmt(T,1)+'</td><td>'+(h?fmt(pcs,0):'-')+'</td>'
-        +'<td class="'+(h&&sel2<0?'sisa-low':'')+'">'+(h?(sel2>0?'+':'')+fmt(sel2,1):'-')+'</td><td><span class="rkk-badge '+s.c+'">'+s.t+'</span></td>'
-        +'<td>'+(h?'<button class="danger" data-bukalagi="'+h.id+'" style="color:var(--blue)">Buka Lagi</button> ':'')+'<button class="danger" data-delambil="'+a.id+'">Hapus</button></td></tr>'
-        +(h?'<tr><td colspan="8"><div class="note"><b>'+esc(h.kelompok||'')+':</b> '+h.items.map(function(v){return esc(v.nama)+' '+fmt(v.pcs,0);}).join(' · ')+(h.alasan?' — <b>Alasan:</b> '+esc(h.alasan):'')
-          +(h.kemasan&&h.kemasan.length?'<br><b>Kemasan terpotong:</b> '+h.kemasan.map(function(k){return esc(k.varian)+' → '+esc(k.namaItem)+' ×'+fmt(k.qty,2);}).join(' · '):'')
-          +(h.kemasanDilewati&&h.kemasanDilewati.length?'<br><span class="sisa-low">Kemasan tidak dipotong (ambigu): '+h.kemasanDilewati.map(esc).join(', ')+'</span>':'')
-          +'</div></td></tr>':'');
-    }).join('');
-    var C='<div class="card"><h2>3. Rekonsiliasi</h2><div class="sub">Selisih = Total Jadi − Standar Jadi (negatif = hasil kurang dari standar). Total di sini gabungan semua varian; rinci per varian ada di baris di bawahnya.</div>'
-      +'<div class="inline"><div class="field"><label>Toleransi (%)</label><input type="number" min="0" step="any" id="rkk-tol" value="'+esc(S.tol)+'" style="width:90px;"></div></div>'
-      +'<table><thead><tr><th>No</th><th>Tanggal</th><th>Kode Diambil</th><th>Standar Jadi</th><th>Total Jadi</th><th>Selisih</th><th>Status</th><th></th></tr></thead><tbody>'
-      +(rowsC||'<tr><td colspan="8" class="empty">Belum ada pengambilan</td></tr>')+'</tbody></table></div>';
-    return '<div id="rkk-root">'+A+B+C+'</div>';
-  }
-
-  function updAmbil(){
-    var bar=document.getElementById('rkk-bar'); if(!bar) return;
-    var tr=0,ts=0,parts=[],bad=false,ada=false,noStd=false;
-    premixList().forEach(function(it){
-      var q=parseFloat(S.qty[it.id])||0, over=q>stokItem(it.id).sisa+1e-9;
-      var c=document.querySelector('.rkk-card[data-id="'+it.id+'"]'); if(c) c.className='rkk-card'+(q>0?(over?' over':' on'):'');
-      if(q>0){ada=true; tr+=q*nilaiR(it); ts+=q*std(it); parts.push(fmt(q,2)+'× '+esc(it.nama)+' ('+fmt(q*std(it),1)+')'); if(over)bad=true; if(!(std(it)>0))noStd=true;}
-    });
-    bar.innerHTML='<b>Total adonan: '+fmt(tr,2)+' R · Standar Jadi: '+fmt(ts,1)+'</b>'+(ada?' &nbsp;·&nbsp; '+parts.join(' + '):' — belum ada kode dipilih')
-      +(bad?'<div class="sisa-low">Ada kode melebihi stok (kartu merah).</div>':'')+(noStd?'<div class="sisa-low">Isi standar jadi untuk kode yang dipilih.</div>':'');
-    var b=document.getElementById('rkk-simpan-ambil'); if(b) b.disabled=!ada||bad||noStd;
-  }
-
   function kumpulHasil(){
-    var m={}, rm={};
-    document.querySelectorAll('.rkk-pcs').forEach(function(i){var n=VN[i.dataset.i],p=parseFloat(i.value)||0; if(p>0) m[n]=(m[n]||0)+p;});
-    document.querySelectorAll('.rkk-rpk').forEach(function(i){var n=VN[i.dataset.i],r=parseFloat(i.value)||0; if(r>0) rm[n]=(rm[n]||0)+r;});
-    S.extra.forEach(function(e){var n=(e.n||'').trim(),p=parseFloat(e.p)||0,r=parseFloat(e.r)||0; if(n&&p>0) m[n]=(m[n]||0)+p; if(n&&r>0) rm[n]=(rm[n]||0)+r;});
-    return Object.keys(m).map(function(n){return {nama:n,pcs:m[n],r:rm[n]||0};});
+    var m={};
+    VN.forEach(function(n,i){var p=parseFloat(S.v[n])||0; if(p>0) m[n]=(m[n]||0)+p;});
+    S.ex.forEach(function(e){var n=(e.n||'').trim(),p=parseFloat(e.p)||0; if(n&&p>0) m[n]=(m[n]||0)+p;});
+    return Object.keys(m).map(function(n){return {nama:n,jumlah:m[n]};});
+  }
+  function status(std,pcs){
+    if(!(pcs>0)) return {t:'BELUM ADA HASIL',c:'#666',bg:'#eee'};
+    var sel=pcs-std, tl=std*tol()/100;
+    if(Math.abs(sel)<=tl) return {t:'NORMAL',c:'#2e6e62',bg:'#dceae2'};
+    return sel<0?{t:'HASIL KURANG',c:'#b4442e',bg:'#f5dad3'}:{t:'HASIL LEBIH',c:'#8a5a16',bg:'#fbecc8'};
+  }
+  function kelDefault(rows){
+    var b=rows.slice().sort(function(a,c){return qtyR(c)-qtyR(a);})[0]; if(!b) return '';
+    var it=itemById(b.itemId); if(!it) return '';
+    var n=String(it.nama||'').replace(/\bPMX\b/ig,'').replace(/\d+(?:[.,]\d+)?\s*R\b/ig,'').replace(/\s+/g,' ').trim();
+    return n||it.nama;
+  }
+  function stokOver(rows){
+    var per={},over=[];
+    rows.forEach(function(r){per[r.itemId]=(per[r.itemId]||0)+qtyKeluar(r);});
+    Object.keys(per).forEach(function(id){
+      var it=itemById(id), sisa=stokItem(id).sisa;
+      if(per[id]>sisa+1e-9) over.push((it?it.kode+' '+it.nama:id)+' (butuh '+fmt(per[id],2)+', stok '+fmt(sisa,2)+')');
+    });
+    return over;
   }
 
-  function updHasil(){
-    if(!document.getElementById('rkk-h-jadi')) return;
-    var a=list(DA).find(function(x){return x.id===S.pickId;}); if(!a) return;
-    var hs=kumpulHasil(), pcs=hs.reduce(function(s,v){return s+v.pcs;},0), sd=hitungStd(a,hs), sel=pcs-sd.total, s=status(a,pcs,pcs>0,sd.total);
-    document.getElementById('rkk-h-std').textContent=fmt(sd.total,1)+(sd.mode==='B'?' (per varian)':'');
-    document.getElementById('rkk-h-jadi').textContent=fmt(pcs,0);
-    document.getElementById('rkk-h-sel').textContent=(sel>0?'+':'')+fmt(sel,1)+(sd.total>0?' ('+fmt(sel/sd.total*100,1)+'%)':'');
-    var al=document.getElementById('rkk-alok');
-    if(al){
-      if(sd.mode==='B'){
-        var msg='Premix dialokasikan: <b>'+fmt(sd.pakai,2)+' R</b> dari '+fmt(a.totalR,2)+' R diambil.';
-        if(sd.pakai>a.totalR+1e-9) msg+='<div class="sisa-low">R dipakai melebihi R yang diambil. Periksa angkanya.</div>';
-        else if(sd.sisa>1e-9) msg+='<div class="sisa-low">Sisa '+fmt(sd.sisa,2)+' R belum dialokasikan, dihitung memakai standar rata-rata.</div>';
-        var tanpaStd=hs.filter(function(v){return v.r>0&&!stdVget(v.nama);}).map(function(v){return esc(v.nama);});
-        if(tanpaStd.length) msg+='<div class="note">Standar per R belum diisi (dipakai rata-rata): '+tanpaStd.join(', ')+'</div>';
-        al.innerHTML=msg;
-      } else al.innerHTML='';
-    }
-    document.getElementById('rkk-h-st').innerHTML='<span class="rkk-badge '+s.c+'">'+s.t+'</span>';
-    document.getElementById('rkk-h-box').className='stat '+(pcs>0?(s.t==='NORMAL'?'pos':'neg'):'');
-
-    // Pratinjau kemasan yang akan dipotong
-    var pv=document.getElementById('rkk-kemasan-prev');
-    if(pv){
-      var baris=[],tanpa=[],ambigu=[];
-      hs.forEach(function(v){
-        var b=bomTunggal(v.nama);
-        if(b.ambigu){ambigu.push(esc(v.nama)+' (terdaftar di: '+b.kandidat.map(function(k){return esc(k.namaItem);}).join(', ')+')'); return;}
-        if(!b.list.length){tanpa.push(esc(v.nama)); return;}
-        b.list.forEach(function(k){baris.push(esc(v.nama)+' '+fmt(v.pcs,0)+' pcs → <b>'+esc(k.namaItem)+' ×'+fmt(v.pcs*k.rasio,2)+'</b>');});
-      });
-      pv.innerHTML=(S.potong===false?'<div class="sisa-low">Potong kemasan otomatis dimatikan. Tidak ada kemasan yang akan dipotong.</div>':
-          (baris.length?'<b>Kemasan yang akan dipotong:</b><br>'+baris.join('<br>'):''))
-        +(ambigu.length?'<div class="sisa-low">Terdaftar di lebih dari satu kemasan, TIDAK dipotong. Rapikan di tab Kode: '+ambigu.join('; ')+'</div>':'')
-        +(tanpa.length?'<div class="note">Tanpa BOM kemasan / rasio belum diisi (tidak dipotong): '+tanpa.join(', ')+'</div>':'');
-    }
-
-    var bx=document.getElementById('rkk-alasan-box'); if(bx) bx.style.display=(pcs>0&&s.t!=='NORMAL')?'':'none';
+  function html(){
+    var pm=premixItems(); VN=varianNames();
+    var rowsH=S.rows.map(function(r,i){
+      var it=r.itemId?itemById(r.itemId):null;
+      var opts=pm.map(function(p){return '<option value="'+p.id+'"'+(p.id===r.itemId?' selected':'')+'>'+esc(p.kode)+' - '+esc(p.nama)+'</option>';}).join('');
+      var ro=it?(it.resepList||[]).map(function(rs){
+        return '<option value="'+rs.id+'"'+(rs.id===r.resepId?' selected':'')+'>'+fmt(rs.resepQty)+'R'+(rs.premixKg>0?' = '+rs.premixKg+' '+esc(it.satuan):'')+' · standar '+fmt(standarProfilTotal(rs),1)+'</option>';
+      }).join(''):'';
+      var noResep=it&&!(it.resepList||[]).length;
+      return '<tr>'
+        +'<td><select class="pg-item" data-i="'+i+'"><option value="">-- pilih premix --</option>'+opts+'</select>'+(noResep?'<div class="sisa-low" style="font-size:11px;">Belum ada resep di tab Kode</div>':'')+'</td>'
+        +'<td><select class="pg-resep" data-i="'+i+'"'+(it?'':' disabled')+'><option value="">-- pilih resep --</option>'+ro+'</select></td>'
+        +'<td><input type="number" min="0" step="any" class="pg-paket" data-i="'+i+'" value="'+esc(r.paket)+'" style="width:70px;"></td>'
+        +'<td id="pg-std-'+i+'">-</td><td id="pg-stok-'+i+'">-</td>'
+        +'<td>'+(S.rows.length>1?'<button type="button" class="danger" data-pg-del="'+i+'">Hapus</button>':'')+'</td></tr>';
+    }).join('');
+    var vr=VN.map(function(n,i){
+      return '<tr class="pg-vrow" data-n="'+esc(n.toLowerCase())+'"><td>'+esc(n)+'</td><td><input type="number" min="0" step="any" class="pg-v" data-i="'+i+'" value="'+esc(S.v[n]==null?'':S.v[n])+'" placeholder="pcs" style="width:110px;"></td></tr>';
+    }).join('');
+    var ex=S.ex.map(function(e,i){
+      return '<tr><td><input type="text" class="pg-exn" data-i="'+i+'" value="'+esc(e.n)+'" placeholder="varian lain (ketik nama)" style="width:210px;"></td><td><input type="number" min="0" step="any" class="pg-exp" data-i="'+i+'" value="'+esc(e.p)+'" placeholder="pcs" style="width:110px;"></td></tr>';
+    }).join('');
+    return '<div class="card" id="pg-card">'
+      +'<h2>Catat Produksi: Banyak Premix / Ukuran Sekaligus</h2>'
+      +'<div class="sub">Pilih tiap kode premix yang diambil (misal Manis 1R, 3R, 5R). <b>Stok tiap kode berkurang sendiri-sendiri.</b> Standar jadi dihitung <b>per kode</b> lalu dijumlahkan (contoh: 3R 120 + 5R 200 = 320). Hasil diisi per varian roti dan disimpan sebagai <b>satu hasil produksi / satu stok</b>.</div>'
+      +'<table><thead><tr><th>Premix</th><th>Resep/Ukuran</th><th>Jml Paket</th><th>Standar Jadi</th><th>Stok / Keluar</th><th></th></tr></thead><tbody>'+rowsH+'</tbody></table>'
+      +'<div style="margin-top:8px;"><button type="button" class="primary" id="pg-tambah"'+(S.rows.length>=MAXROW?' disabled':'')+'>+ Tambah Premix</button></div>'
+      +'<div class="note" id="pg-bar" style="margin-top:8px;"></div>'
+      +(VN.length||true?'<h3 style="font-size:13px;margin:14px 0 4px 0;">Hasil jadi per varian (gabungan semua premix di atas)</h3>'
+        +(VN.length?'<div class="inline"><div class="field"><label>Cari varian</label><input type="text" id="pg-cari" placeholder="ketik nama roti"></div></div>':'')
+        +'<table><thead><tr><th>Varian Roti</th><th>Hasil (pcs)</th></tr></thead><tbody>'+vr+ex+'</tbody></table>':'')
+      +'<div class="inline" style="margin-top:10px;">'
+        +'<div class="field"><label>Nama hasil (kelompok stok)</label><input type="text" id="pg-kel" value="'+esc(S.kel)+'" placeholder="otomatis dari nama premix"></div>'
+        +'<div class="field"><label>Tanggal</label><input type="date" id="pg-tgl" value="'+esc(S.tgl||today())+'"></div>'
+        +'<div class="field"><label>Keterangan</label><input type="text" id="pg-ket" value="'+esc(S.ket)+'" placeholder="opsional"></div></div>'
+      +'<div class="grid" style="margin-top:10px;">'
+        +'<div class="stat"><div class="label">Standar Jadi (Σ per kode)</div><div class="value" id="pg-std">0</div></div>'
+        +'<div class="stat"><div class="label">Total Jadi (aktual)</div><div class="value" id="pg-jadi">0</div></div>'
+        +'<div class="stat" id="pg-sel-box"><div class="label">Selisih</div><div class="value" id="pg-sel">0</div></div>'
+        +'<div class="stat"><div class="label">Status</div><div class="value" id="pg-st" style="font-size:14px;">-</div></div></div>'
+      +'<div class="field" id="pg-alasan-box" style="display:none;margin-top:10px;"><label>Alasan selisih (wajib, di luar toleransi ±'+tol()+'%)</label><input type="text" id="pg-alasan" value="'+esc(S.alasan)+'" style="width:100%;"></div>'
+      +'<div style="margin-top:10px;"><button type="button" class="primary" id="pg-simpan">Simpan Produksi Gabungan</button></div>'
+      +'</div>';
   }
 
-  async function simpanAmbil(){
-    var dp=premixList().filter(function(i){return (parseFloat(S.qty[i.id])||0)>0;}); if(!dp.length) return;
-    var no=list(DA).reduce(function(m,a){return Math.max(m,a.no||0);},0)+1, tgl=S.tgl||today();
-    var rec={id:uid(),dataset:DA,no:no,tanggal:tgl,admin:S.admin,catatan:S.cat,status:'OPEN',items:[],totalR:0,totalStd:0,waktu:new Date().toISOString()};
-    for(var k=0;k<dp.length;k++){
-      var it=dp[k], q=parseFloat(S.qty[it.id])||0, r=nilaiR(it), sd=std(it);
-      var t=await tambahTrx({tanggal:tgl,itemId:it.id,tipe:'keluar',qty:q,ket:'Ambil Premix #'+no+' (Rekon Kode)'+(S.admin?' - '+S.admin:'')});
-      rec.items.push({itemId:it.id,qty:q,r:r,std:sd,trxId:t?t.id:null}); rec.totalR+=q*r; rec.totalStd+=q*sd;
-    }
-    riwayatEdit.push(rec); await save('riwayatEdit',riwayatEdit);
-    S.qty={}; S.cat=''; S.pickId=rec.id; S.pcs={}; S.kel='';
-    renderAll();
-  }
-
-  async function simpanHasil(){
-    var a=list(DA).find(function(x){return x.id===S.pickId&&x.status==='OPEN';}); if(!a){alert('Pilih pengambilan dulu.');return;}
-    var hs=kumpulHasil(); if(!hs.length){alert('Isi minimal satu varian roti.');return;}
-    var pcs=hs.reduce(function(s,v){return s+v.pcs;},0), sd=hitungStd(a,hs), s=status(a,pcs,true,sd.total), alasan=(S.alasan||'').trim();
-    if(sd.mode==='B' && sd.pakai>a.totalR+1e-9 && !confirm('R dipakai ('+fmt(sd.pakai,2)+') melebihi R yang diambil ('+fmt(a.totalR,2)+'). Tetap simpan?')) return;
-    if(s.t!=='NORMAL'&&!alasan){alert('Selisih di luar toleransi ('+s.t+'). Isi alasan dulu.');return;}
-    var tgl=S.hTgl||today(), kel=(S.kel||'').trim()||'Lainnya';
-    var main=a.items.slice().sort(function(x,y){return y.r-x.r;})[0], pid=uid();
-
-    // Cek dulu varian yang ambigu SEBELUM ada transaksi yang tersimpan
-    var dilewati=[];
-    if(S.potong!==false){
-      hs.forEach(function(v){ if(bomTunggal(v.nama).ambigu) dilewati.push(v.nama); });
-      if(dilewati.length && !confirm('Varian ini terdaftar di lebih dari satu kemasan, kemasannya TIDAK dipotong:\n- '+dilewati.join('\n- ')+'\n\nLanjut simpan hasil?')) return;
-    }
-
-    // 1. Pemotongan stok kemasan (satu varian = satu kemasan)
-    var listTrxKemasan=[], rincianKemasan=[];
-    if(S.potong!==false){
-      for(var i=0;i<hs.length;i++){
-        var varian=hs[i], b=bomTunggal(varian.nama);
-        for(var j=0;j<b.list.length;j++){
-          var km=b.list[j], qtyDibutuhkan=varian.pcs*km.rasio;
-          var trxK=await tambahTrx({
-            tanggal:tgl, itemId:km.itemId, tipe:'keluar', qty:qtyDibutuhkan,
-            ket:'Kemasan '+varian.nama+' ('+varian.pcs+' pcs) - Rekon Kode #'+a.no
-          });
-          if(trxK) listTrxKemasan.push(trxK.id);
-          rincianKemasan.push({varian:varian.nama,namaItem:km.namaItem,qty:qtyDibutuhkan});
-        }
+  function upd(){
+    var rows=aktif(), std=rows.reduce(function(s,r){return s+stdRow(r);},0), hs=kumpulHasil();
+    var pcs=hs.reduce(function(s,v){return s+v.jumlah;},0), st=status(std,pcs), sel=pcs-std;
+    S.rows.forEach(function(r,i){
+      var a=document.getElementById('pg-std-'+i), b=document.getElementById('pg-stok-'+i);
+      if(a) a.textContent=resepOf(r)?fmt(stdRow(r),1):'-';
+      if(b){
+        if(r.itemId&&resepOf(r)){
+          var it=itemById(r.itemId), sisa=stokItem(r.itemId).sisa, k=qtyKeluar(r);
+          b.innerHTML='<span class="'+(k>sisa+1e-9?'sisa-low':'')+'">keluar '+fmt(k,2)+' / stok '+fmt(sisa,2)+' '+esc(it.satuan)+'</span>';
+        } else b.textContent='-';
       }
-    }
-
-    // 2. Simpan data produksi roti (tetap per varian)
-    produksi.push({
-      id: pid,
-      tanggal: tgl,
-      premixItemId: main.itemId,
-      resepId: null,
-      resepRincian: a.items.map(function(i){return {resepQty:i.r,count:i.qty};}),
-      qtyPremix: a.items.reduce(function(s2,i){return s2+i.qty;},0),
-      premixDiambil: null,
-      varianHasil: hs.map(function(v){return {nama:v.nama,jumlah:v.pcs};}),
-      totalHasil: pcs,
-      ket: 'Rekon Kode #'+a.no,
-      labelBatch: 'Rekon Kode #'+a.no,
-      kelompok: kel,
-      standarJadi: sd.total,
-      premixSeharusnya: null,
-      trxId: null,
-      rekonKodeId: a.id
     });
-
-    // 3. Riwayat hasil (termasuk ID trx kemasan untuk Buka Lagi/Hapus)
-    riwayatEdit.push({
-      id: uid(),
-      dataset: DH,
-      ambilId: a.id,
-      tanggal: tgl,
-      admin: S.hAdmin,
-      alasan: alasan,
-      kelompok: kel,
-      items: hs,
-      totalPcs: pcs,
-      produksiId: pid,
-      trxKemasanIds: listTrxKemasan,
-      kemasan: rincianKemasan,
-      kemasanDilewati: dilewati,
-      standarPakai: sd.total,
-      alokasiR: hs.filter(function(v){return v.r>0;}).map(function(v){return {nama:v.nama,r:v.r};}),
-      waktu: new Date().toISOString()
-    });
-
-    a.status='CLOSED';
-    await save('produksi',produksi); await save('riwayatEdit',riwayatEdit);
-    S.pickId=null; S.pcs={}; S.extra=[{n:'',p:'',r:''},{n:'',p:'',r:''},{n:'',p:'',r:''}]; S.rr={}; S.alasan=''; S.kel='';
-    renderAll();
-  }
-
-  async function hapusAmbil(id){
-    var a=list(DA).find(function(x){return x.id===id;}); if(!a) return;
-    var h=list(DH).find(function(x){return x.ambilId===id;});
-    if(!confirm('Hapus pengambilan #'+a.no+'? Stok premix dikembalikan'+(h?' dan stok kemasan/hasil roti dikembalikan.':'.'))) return;
-
-    var tids=a.items.map(function(i){return i.trxId;}).filter(Boolean);
-    if(h && h.trxKemasanIds) tids=tids.concat(h.trxKemasanIds);
-
-    trx=trx.filter(function(t){return tids.indexOf(t.id)<0;});
-    if(h) produksi=produksi.filter(function(p){return p.id!==h.produksiId;});
-    riwayatEdit=riwayatEdit.filter(function(r){return r.id!==a.id&&!(h&&r.id===h.id);});
-    await save('trx',trx); if(h) await save('produksi',produksi); await save('riwayatEdit',riwayatEdit);
-    if(S.pickId===id) S.pickId=null; renderAll();
-  }
-
-  async function bukaLagi(hid){
-    var h=list(DH).find(function(x){return x.id===hid;}); if(!h) return;
-    if(!confirm('Buka lagi? Hasil roti dan pemotongan stok kemasan akan dibatalkan, lalu bisa diisi ulang.')) return;
-    var a=list(DA).find(function(x){return x.id===h.ambilId;});
-
-    if(h.trxKemasanIds && h.trxKemasanIds.length>0){
-      trx=trx.filter(function(t){return h.trxKemasanIds.indexOf(t.id)<0;});
-      await save('trx',trx);
+    var parts=rows.map(function(r){var it=itemById(r.itemId),rs=resepOf(r); return esc(it.kode)+' '+fmt(rs.resepQty)+'R×'+fmt(paketOf(r))+' = '+fmt(stdRow(r),1);});
+    var bar=document.getElementById('pg-bar');
+    if(bar){
+      var over=stokOver(rows);
+      bar.innerHTML=(rows.length?'<b>Standar:</b> '+parts.join(' + ')+' = <b>'+fmt(std,1)+'</b> pcs':'Belum ada premix lengkap (kode + resep + paket).')
+        +(over.length?'<div class="sisa-low">Melebihi stok: '+over.map(esc).join('; ')+'</div>':'');
     }
-
-    produksi=produksi.filter(function(p){return p.id!==h.produksiId;});
-    riwayatEdit=riwayatEdit.filter(function(r){return r.id!==h.id;});
-    if(a) a.status='OPEN';
-    await save('produksi',produksi); await save('riwayatEdit',riwayatEdit); renderAll();
+    var e=function(id){return document.getElementById(id);};
+    if(e('pg-std')) e('pg-std').textContent=fmt(std,1);
+    if(e('pg-jadi')) e('pg-jadi').textContent=fmt(pcs,0);
+    if(e('pg-sel')) e('pg-sel').textContent=(sel>0?'+':'')+fmt(sel,1)+(std>0?' ('+fmt(sel/std*100,1)+'%)':'');
+    if(e('pg-st')) e('pg-st').innerHTML='<span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;background:'+st.bg+';color:'+st.c+';">'+st.t+'</span>';
+    if(e('pg-sel-box')) e('pg-sel-box').className='stat '+(pcs>0?(st.t==='NORMAL'?'pos':'neg'):'');
+    if(e('pg-alasan-box')) e('pg-alasan-box').style.display=(pcs>0&&st.t!=='NORMAL')?'':'none';
   }
 
-  function attach(){
-    var root=document.getElementById('rkk-root'); if(!root) return;
-    updAmbil(); updHasil();
-    function setQty(id,v){v=Math.max(0,Math.round(v*1000)/1000); S.qty[id]=v>0?v:''; var i=root.querySelector('.rkk-qty[data-id="'+id+'"]'); if(i) i.value=S.qty[id]; updAmbil();}
-    root.addEventListener('click',async function(e){
-      var b=e.target.closest('button'); if(!b||!root.contains(b)) return; var d=b.dataset;
-      if(d.plus) setQty(d.plus,(parseFloat(S.qty[d.plus])||0)+1);
-      else if(d.minus) setQty(d.minus,(parseFloat(S.qty[d.minus])||0)-1);
-      else if(d.pick){S.pickId=d.pick;S.pcs={};S.rr={};S.alasan='';S.kel='';renderAll();}
-      else if(d.delambil) await hapusAmbil(d.delambil);
-      else if(d.bukalagi) await bukaLagi(d.bukalagi);
-      else if(b.id==='rkk-simpan-ambil'){b.disabled=true; await simpanAmbil();}
-      else if(b.id==='rkk-simpan-hasil'){b.disabled=true; await simpanHasil(); b.disabled=false;}
+  function mount(){
+    var main=document.getElementById('main'); if(!main) return;
+    var old=document.getElementById('pg-card');
+    if(!old){
+      var h2s=main.querySelectorAll('h2');
+      for(var i=0;i<h2s.length;i++){ if(h2s[i].textContent.indexOf('Banyak Premix')>=0){ old=h2s[i].closest('.card'); break; } }
+    }
+    if(!old) return;
+    var tmp=document.createElement('div'); tmp.innerHTML=html();
+    var card=tmp.firstChild; old.replaceWith(card);
+    bind(card); upd();
+  }
+
+  function bind(root){
+    root.addEventListener('change',function(e){
+      var el=e.target, c=el.classList, i=parseInt(el.dataset.i);
+      if(c.contains('pg-item')){
+        S.rows[i].itemId=el.value;
+        var it=itemById(el.value), rl=it?(it.resepList||[]):[];
+        S.rows[i].resepId=rl.length===1?rl[0].id:'';
+        if(!S.rows[i].paket) S.rows[i].paket=1;
+        S.kel=''; mount();
+      } else if(c.contains('pg-resep')){ S.rows[i].resepId=el.value; S.kel=''; mount(); }
     });
     root.addEventListener('input',function(e){
-      var el=e.target, c=el.classList;
-      if(c.contains('rkk-qty')){S.qty[el.dataset.id]=el.value; updAmbil();}
-      else if(c.contains('rkk-pcs')){S.pcs[VN[el.dataset.i]]=el.value; updHasil();}
-      else if(c.contains('rkk-rpk')){S.rr[VN[el.dataset.i]]=el.value; updHasil();}
-      else if(c.contains('rkk-exr')){S.extra[el.dataset.i].r=el.value; updHasil();}
-      else if(c.contains('rkk-exn')){S.extra[el.dataset.i].n=el.value; updHasil();}
-      else if(c.contains('rkk-exp')){S.extra[el.dataset.i].p=el.value; updHasil();}
-      else if(el.id==='rkk-potong'){S.potong=el.checked; updHasil();}
-      else if(el.id==='rkk-tgl') S.tgl=el.value;
-      else if(el.id==='rkk-admin'){S.admin=el.value; try{localStorage.setItem('rkk_admin_g',el.value);}catch(x){}}
-      else if(el.id==='rkk-cat') S.cat=el.value;
-      else if(el.id==='rkk-htgl') S.hTgl=el.value;
-      else if(el.id==='rkk-hadmin'){S.hAdmin=el.value; try{localStorage.setItem('rkk_admin_p',el.value);}catch(x){}}
-      else if(el.id==='rkk-kel') S.kel=el.value;
-      else if(el.id==='rkk-alasan') S.alasan=el.value;
-      else if(el.id==='rkk-cari'){var t=el.value.trim().toLowerCase(); root.querySelectorAll('.rkk-vrow').forEach(function(r){r.style.display=(!t||r.dataset.n.indexOf(t)>=0)?'':'none';});}
+      var el=e.target, c=el.classList, i=parseInt(el.dataset.i);
+      if(c.contains('pg-paket')){S.rows[i].paket=el.value; upd();}
+      else if(c.contains('pg-v')){S.v[VN[i]]=el.value; upd();}
+      else if(c.contains('pg-exn')){S.ex[i].n=el.value; upd();}
+      else if(c.contains('pg-exp')){S.ex[i].p=el.value; upd();}
+      else if(el.id==='pg-kel') S.kel=el.value;
+      else if(el.id==='pg-tgl') S.tgl=el.value;
+      else if(el.id==='pg-ket') S.ket=el.value;
+      else if(el.id==='pg-alasan') S.alasan=el.value;
+      else if(el.id==='pg-cari'){var t=el.value.trim().toLowerCase(); root.querySelectorAll('.pg-vrow').forEach(function(r){r.style.display=(!t||r.dataset.n.indexOf(t)>=0)?'':'none';});}
     });
-    root.addEventListener('change',async function(e){
-      var el=e.target;
-      if(el.classList.contains('rkk-sv')){
-        var nv=VN[el.dataset.i]; var vv=parseFloat(el.value); await stdVset(nv,vv>0?vv:0); updHasil();
-      } else if(el.classList.contains('rkk-std')){
-        var it=itemById(el.dataset.id); if(!it) return;
-        var v=parseFloat(el.value); it.standarHasil=v>0?v:undefined;
-        await save('items',items); renderAll();
-      } else if(el.id==='rkk-tol'){
-        var t=parseFloat(el.value); S.tol=t>=0?t:5; try{localStorage.setItem('rkk_tol',String(S.tol));}catch(x){} renderAll();
-      }
+    root.addEventListener('click',async function(e){
+      var b=e.target.closest('button'); if(!b||!root.contains(b)) return;
+      if(b.id==='pg-tambah'){ if(S.rows.length<MAXROW) S.rows.push({itemId:'',resepId:'',paket:1}); mount(); }
+      else if(b.dataset.pgDel!=null){ S.rows.splice(parseInt(b.dataset.pgDel),1); if(!S.rows.length) S.rows=[{itemId:'',resepId:'',paket:1}]; S.kel=''; mount(); }
+      else if(b.id==='pg-simpan'){ b.disabled=true; try{ await simpan(); } finally { b.disabled=false; } }
     });
   }
 
-  if(!TABS.some(function(t){return t.id==='rekonkode';})){
-    TABS.push({id:'rekonkode',label:'Rekon Kode',badge:function(){return list(DA).filter(function(a){return a.status==='OPEN';}).length;}});
+  async function simpan(){
+    var rows=aktif();
+    if(!rows.length){alert('Pilih minimal satu premix lengkap (kode + resep + jumlah paket).');return;}
+    var hs=kumpulHasil();
+    if(!hs.length){alert('Isi hasil minimal satu varian roti.');return;}
+    var std=rows.reduce(function(s,r){return s+stdRow(r);},0);
+    var pcs=hs.reduce(function(s,v){return s+v.jumlah;},0), st=status(std,pcs), alasan=(S.alasan||'').trim();
+    if(st.t!=='NORMAL'&&!alasan){alert('Selisih di luar toleransi ('+st.t+'). Isi alasan dulu.');return;}
+    var over=stokOver(rows);
+    if(over.length&&!confirm('Stok premix tidak cukup:\n- '+over.join('\n- ')+'\n\nTetap simpan?')) return;
+
+    var tgl=S.tgl||today(), kel=(S.kel||'').trim()||kelDefault(rows)||'Gabungan';
+    var main=rows.slice().sort(function(a,b){return qtyR(b)-qtyR(a);})[0];
+    var ketUser=(S.ket||'').trim();
+    var ringkas=rows.map(function(r){var it=itemById(r.itemId),rs=resepOf(r); return it.kode+' '+fmt(rs.resepQty)+'R×'+fmt(paketOf(r));}).join(' + ');
+
+    var trxIds=[];
+    for(var k=0;k<rows.length;k++){
+      var r=rows[k], rs=resepOf(r), q=qtyKeluar(r);
+      var t=await tambahTrx({tanggal:tgl,itemId:r.itemId,tipe:'keluar',qty:q,
+        ket:'Produksi gabungan ('+fmt(rs.resepQty)+'Rx'+fmt(paketOf(r))+')'+(ketUser?': '+ketUser:'')});
+      if(t) trxIds.push(t.id);
+    }
+    var sat=itemById(rows[0].itemId).satuan, sama=rows.every(function(r){return itemById(r.itemId).satuan===sat;});
+    var totalR=rows.reduce(function(s,r){return s+qtyR(r);},0);
+    var keluarTotal=rows.reduce(function(s,r){return s+qtyKeluar(r);},0);
+
+    produksi.push({
+      id:uid(), tanggal:tgl, premixItemId:main.itemId, resepId:null,
+      resepRincian:rows.map(function(r){return {resepQty:resepOf(r).resepQty,count:paketOf(r)};}),
+      qtyPremix:totalR, premixDiambil:sama?keluarTotal:null,
+      varianHasil:hs, totalHasil:pcs,
+      ket:'Gabungan: '+ringkas+(ketUser?' — '+ketUser:'')+(alasan?' | Alasan selisih: '+alasan:''),
+      labelBatch:kel, kelompok:kel,
+      standarJadi:std, premixSeharusnya:std>0?totalR*(pcs/std):null,
+      trxId:trxIds[0]||null, trxIds:trxIds, gabungan:true
+    });
+    await save('produksi',produksi);
+
+    S={rows:[{itemId:'',resepId:'',paket:1}], v:{}, ex:[{n:'',p:''},{n:'',p:''},{n:'',p:''}], kel:'', ket:'', tgl:'', alasan:''};
+    renderAll();
   }
+
+  // Hapus / edit produksi gabungan: kembalikan stok SEMUA kode yang terpotong
+  window.addEventListener('click',async function(e){
+    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
+    var del=b.getAttribute('data-del-produksi');
+    var ed=b.getAttribute('data-edit-produksi')||b.getAttribute('data-save-edit-produksi');
+    var id=del||ed; if(!id) return;
+    var p=produksi.find(function(x){return x.id===id;});
+    if(!p||!p.gabungan) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    if(ed){alert('Produksi gabungan tidak bisa diedit per baris. Hapus lalu catat ulang.');return;}
+    if(!confirm('Hapus produksi gabungan ini? Stok semua kode premix yang terpotong dikembalikan.')) return;
+    var ids=p.trxIds||[];
+    trx=trx.filter(function(t){return ids.indexOf(t.id)<0;});
+    produksi=produksi.filter(function(x){return x.id!==id;});
+    await save('trx',trx); await save('produksi',produksi);
+    renderAll();
+  },true);
+
   var _asli=renderAll;
   renderAll=function(){
-    if(activeTab==='rekonkode'){renderNav(); document.getElementById('main').innerHTML=view(); attach(); return;}
     _asli();
+    if(activeTab==='produksi') mount();
   };
   renderAll();
-
-  window.addEventListener('click',function(e){
-    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
-    var id=b.getAttribute('data-del-produksi')||b.getAttribute('data-edit-produksi')||b.getAttribute('data-save-edit-produksi'); if(!id) return;
-    var p=produksi.find(function(x){return x.id===id;});
-    if(p&&p.rekonKodeId){e.stopImmediatePropagation();e.preventDefault();alert('Produksi ini berasal dari tab Rekon Kode. Ubah/hapus lewat tab Rekon Kode (Buka Lagi / Hapus).');}
-  },true);
 })();
