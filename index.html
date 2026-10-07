@@ -4449,9 +4449,7 @@ subscribeRealtime = function(){
 <script>
 <script>
 // =====================================================================
-// TAB "REKON KODE": ambil beberapa kode premix sekaligus (1R/3R/5R),
-// standar jadi MELEKAT PER KODE, hasil roti dicatat per varian dalam satu kelompok.
-// Standar Jadi total = Σ (standar kode × jumlah diambil).  Selisih = Hasil − Standar.
+// TAB "REKON KODE": Pengambilan Premix Multi-Kode & Auto-Deduct Kemasan (BOM)
 // =====================================================================
 (function(){
   var DA='rkk_ambil', DH='rkk_hasil';
@@ -4481,7 +4479,7 @@ subscribeRealtime = function(){
   function fmt(n,d){return (n||0).toLocaleString('id-ID',{maximumFractionDigits:d==null?2:d});}
   function list(ds){return riwayatEdit.filter(function(r){return r.dataset===ds;});}
   function nilaiR(it){var v=parseFloat(it&&it.nilaiR); if(v>0) return v; var m=String((it&&it.nama)||'').match(/(\d+(?:[.,]\d+)?)\s*R\b/i); return m?(parseFloat(m[1].replace(',','.'))||1):1;}
-  // standar per kemasan: isian sendiri, kalau kosong pakai angka paling umum dari data lama
+  
   function modeStd(it){
     var vals=[]; (it.resepList||[]).forEach(function(r){var v=(r.varian||[])[0]; if(!v)return;
       var mn=Number(v.min)||0, mx=(v.max!=null&&v.max!=='')?Number(v.max):mn, a=(mn+mx)/2; if(a>0) vals.push(a);});
@@ -4492,23 +4490,45 @@ subscribeRealtime = function(){
   }
   function std(it){var v=parseFloat(it.standarHasil); return v>0?v:modeStd(it);}
   function premixList(){return items.filter(function(i){return i.kategori==='premix';});}
+  
   function kelDefault(its){
     var b=its.slice().sort(function(a,c){return nilaiR(c)-nilaiR(a);})[0]; if(!b) return '';
     var n=String(b.nama||'').replace(/\bPMX\b/ig,'').replace(/\d+(?:[.,]\d+)?\s*R\b/ig,'').replace(/\s+/g,' ').trim();
     return n||b.nama;
   }
+
   function namaVarian(){
     var set={};
     semuaVarianNama().forEach(function(n){set[n]=1;});
     items.forEach(function(it){(it.varianMaster||[]).forEach(function(n){set[n]=1;}); (it.resepList||[]).forEach(function(r){(r.varian||[]).forEach(function(v){set[v.nama]=1;});});});
     return Object.keys(set).sort();
   }
+
+  // LOGIKA UTAMA: BOM KEMASAN PER VARIAN
+  function dapatkanBomKemasan(namaVarianRoti) {
+    var kemasanList = [];
+    items.forEach(function(it) {
+      if (it.kategori === 'kemasan' || it.kategori === 'packing') {
+        (it.resepList || []).forEach(function(r) {
+          (r.varian || []).forEach(function(v) {
+            if (v.nama && v.nama.toLowerCase() === namaVarianRoti.toLowerCase()) {
+              var rasio = parseFloat(v.qtyKemasan) || 1; 
+              kemasanList.push({ itemId: it.id, namaItem: it.nama, rasio: rasio });
+            }
+          });
+        });
+      }
+    });
+    return kemasanList;
+  }
+
   function status(a,pcs,ada){
     if(!ada) return {t:'BELUM ADA HASIL',c:'rkk-gray'};
     var sel=pcs-a.totalStd, tol=a.totalStd*S.tol/100;
     if(Math.abs(sel)<=tol) return {t:'NORMAL',c:'rkk-ok'};
     return sel<0?{t:'HASIL KURANG',c:'rkk-bad'}:{t:'HASIL LEBIH',c:'rkk-warn'};
   }
+
   function rinci(a){return (a.items||[]).map(function(i){var it=itemById(i.itemId);return esc(it?it.nama:'(dihapus)')+' ×'+fmt(i.qty,2);}).join(' + ');}
 
   function view(){
@@ -4524,6 +4544,7 @@ subscribeRealtime = function(){
         +'<div class="field"><label>Standar jadi per kemasan ('+esc(satuanHasilItem(it))+')</label><input type="number" min="0" step="any" class="rkk-std" data-id="'+it.id+'" value="'+esc(sd||'')+'" placeholder="isi standar"></div>'
         +'<div class="rkk-step"><button type="button" data-minus="'+it.id+'">−</button><input type="number" min="0" step="any" class="rkk-qty" data-id="'+it.id+'" value="'+esc(q)+'" placeholder="0"><button type="button" data-plus="'+it.id+'">+</button></div></div>';
     }).join('');
+
     var A='<div class="card"><h2>1. Admin Gudang — Ambil Premix (boleh beberapa kode sekaligus)</h2>'
       +'<div class="sub">Tekan + pada tiap kode yang diambil (misal PMX016 1R, PMX017 3R, PMX018 5R). Stok tiap kode dipotong sendiri-sendiri. <b>Standar jadi diisi per kode</b> (tidak harus lurus), dan total standar dijumlahkan otomatis.</div>'
       +(pm.length===0?'<div class="empty">Belum ada barang kategori Premix di tab Kode</div>':
@@ -4534,7 +4555,7 @@ subscribeRealtime = function(){
        +'<button type="button" class="primary" id="rkk-simpan-ambil">Simpan Pengambilan</button></div>')+'</div>';
 
     var picks=open.map(function(a){return '<button type="button" class="rkk-pick'+(sel&&sel.id===a.id?' on':'')+'" data-pick="'+a.id+'"><b>#'+a.no+'</b> · '+esc(a.tanggal)+' · standar <b>'+fmt(a.totalStd,1)+'</b> · '+fmt(a.totalR,2)+' R<div class="note" style="margin:3px 0 0 0;">'+rinci(a)+'</div></button>';}).join('');
-    var B='<div class="card"><h2>2. Admin Packing — Catat Hasil Roti</h2><div class="sub">Pilih pengambilan, isi pcs tiap varian. Semua varian dihitung sebagai satu hasil jadi dan dibandingkan dengan total standar.</div>'
+    var B='<div class="card"><h2>2. Admin Packing — Catat Hasil Roti & Auto Potong Kemasan</h2><div class="sub">Pilih pengambilan, isi pcs tiap varian. Sistem akan otomatis menghitung hasil jadi dan memotong stok kemasan (OPP/Box) secara independen.</div>'
       +(open.length===0?'<div class="empty">Tidak ada pengambilan yang menunggu hasil.</div>':'<div class="rkk-grid">'+picks+'</div>');
     if(sel){
       VN=namaVarian(); if(!S.kel) S.kel=kelDefault(sel.items.map(function(i){return itemById(i.itemId);}).filter(Boolean));
@@ -4549,7 +4570,7 @@ subscribeRealtime = function(){
         +'<div class="field"><label>Nama hasil jadi (kelompok di stok)</label><input type="text" id="rkk-kel" value="'+esc(S.kel)+'"></div>'
         +'<div class="field"><label>Tanggal</label><input type="date" id="rkk-htgl" value="'+esc(S.hTgl)+'"></div>'
         +'<div class="field"><label>Nama Admin Packing</label><input type="text" id="rkk-hadmin" value="'+esc(S.hAdmin)+'"></div></div>'
-        +'<table><thead><tr><th>Varian Roti</th><th>Hasil (pcs)</th></tr></thead><tbody>'+rows+ex+'</tbody></table>'
+        +'<table><thead><tr><th>Varian Roti</th><th>Hasil (pcs/box)</th></tr></thead><tbody>'+rows+ex+'</tbody></table>'
         +'<div class="field" id="rkk-alasan-box" style="display:none;margin-top:10px;"><label>Alasan selisih (wajib, karena di luar toleransi)</label><input type="text" id="rkk-alasan" value="'+esc(S.alasan)+'" style="width:100%;"></div>'
         +'<div style="margin-top:10px;"><button type="button" class="primary" id="rkk-simpan-hasil">Simpan &amp; Tutup Pengambilan #'+sel.no+'</button></div>';
     }
@@ -4582,12 +4603,14 @@ subscribeRealtime = function(){
       +(bad?'<div class="sisa-low">Ada kode melebihi stok (kartu merah).</div>':'')+(noStd?'<div class="sisa-low">Isi standar jadi untuk kode yang dipilih.</div>':'');
     var b=document.getElementById('rkk-simpan-ambil'); if(b) b.disabled=!ada||bad||noStd;
   }
+
   function kumpulHasil(){
     var m={};
     document.querySelectorAll('.rkk-pcs').forEach(function(i){var p=parseFloat(i.value)||0; if(p>0) m[VN[i.dataset.i]]=(m[VN[i.dataset.i]]||0)+p;});
     S.extra.forEach(function(e){var n=(e.n||'').trim(),p=parseFloat(e.p)||0; if(n&&p>0) m[n]=(m[n]||0)+p;});
     return Object.keys(m).map(function(n){return {nama:n,pcs:m[n]};});
   }
+
   function updHasil(){
     if(!document.getElementById('rkk-h-jadi')) return;
     var a=list(DA).find(function(x){return x.id===S.pickId;}); if(!a) return;
@@ -4612,6 +4635,7 @@ subscribeRealtime = function(){
     S.qty={}; S.cat=''; S.pickId=rec.id; S.pcs={}; S.kel='';
     renderAll();
   }
+
   async function simpanHasil(){
     var a=list(DA).find(function(x){return x.id===S.pickId&&x.status==='OPEN';}); if(!a){alert('Pilih pengambilan dulu.');return;}
     var hs=kumpulHasil(); if(!hs.length){alert('Isi minimal satu varian roti.');return;}
@@ -4619,32 +4643,98 @@ subscribeRealtime = function(){
     if(s.t!=='NORMAL'&&!alasan){alert('Selisih di luar toleransi ('+s.t+'). Isi alasan dulu.');return;}
     var tgl=S.hTgl||today(), kel=(S.kel||'').trim()||'Lainnya';
     var main=a.items.slice().sort(function(x,y){return y.r-x.r;})[0], pid=uid();
-    produksi.push({id:pid,tanggal:tgl,premixItemId:main.itemId,resepId:null,
-      resepRincian:a.items.map(function(i){return {resepQty:i.r,count:i.qty};}),
-      qtyPremix:a.items.reduce(function(s2,i){return s2+i.qty;},0),premixDiambil:null,
-      varianHasil:hs.map(function(v){return {nama:v.nama,jumlah:v.pcs};}),totalHasil:pcs,
-      ket:'Rekon Kode #'+a.no,labelBatch:'Rekon Kode #'+a.no,kelompok:kel,standarJadi:a.totalStd,premixSeharusnya:null,trxId:null,rekonKodeId:a.id});
-    riwayatEdit.push({id:uid(),dataset:DH,ambilId:a.id,tanggal:tgl,admin:S.hAdmin,alasan:alasan,kelompok:kel,items:hs,totalPcs:pcs,produksiId:pid,waktu:new Date().toISOString()});
+    
+    // 1. Eksekusi Pemotongan Stok Kemasan Otomatis Berdasarkan BOM Varian
+    var listTrxKemasan = [];
+    for (var i = 0; i < hs.length; i++) {
+      var varian = hs[i];
+      var listKemasan = dapatkanBomKemasan(varian.nama);
+      for (var j = 0; j < listKemasan.length; j++) {
+        var km = listKemasan[j];
+        var qtyDibutuhkan = varian.pcs * km.rasio;
+        var trxK = await tambahTrx({
+          tanggal: tgl,
+          itemId: km.itemId,
+          tipe: 'keluar',
+          qty: qtyDibutuhkan,
+          ket: 'Kemasan ' + varian.nama + ' (' + varian.pcs + ' pcs) - Rekon Kode #' + a.no
+        });
+        if (trxK) listTrxKemasan.push(trxK.id);
+      }
+    }
+
+    // 2. Simpan Data Produksi Roti
+    produksi.push({
+      id: pid,
+      tanggal: tgl,
+      premixItemId: main.itemId,
+      resepId: null,
+      resepRincian: a.items.map(function(i){return {resepQty:i.r,count:i.qty};}),
+      qtyPremix: a.items.reduce(function(s2,i){return s2+i.qty;},0),
+      premixDiambil: null,
+      varianHasil: hs.map(function(v){return {nama:v.nama,jumlah:v.pcs};}),
+      totalHasil: pcs,
+      ket: 'Rekon Kode #'+a.no,
+      labelBatch: 'Rekon Kode #'+a.no,
+      kelompok: kel,
+      standarJadi: a.totalStd,
+      premixSeharusnya: null,
+      trxId: null,
+      rekonKodeId: a.id
+    });
+
+    // 3. Simpan Riwayat Hasil (Termasuk ID Trx Kemasan untuk Kemudahan Buka Lagi/Hapus)
+    riwayatEdit.push({
+      id: uid(),
+      dataset: DH,
+      ambilId: a.id,
+      tanggal: tgl,
+      admin: S.hAdmin,
+      alasan: alasan,
+      kelompok: kel,
+      items: hs,
+      totalPcs: pcs,
+      produksiId: pid,
+      trxKemasanIds: listTrxKemasan,
+      waktu: new Date().toISOString()
+    });
+
     a.status='CLOSED';
     await save('produksi',produksi); await save('riwayatEdit',riwayatEdit);
     S.pickId=null; S.pcs={}; S.extra=[{n:'',p:''},{n:'',p:''},{n:'',p:''}]; S.alasan=''; S.kel='';
     renderAll();
   }
+
   async function hapusAmbil(id){
     var a=list(DA).find(function(x){return x.id===id;}); if(!a) return;
     var h=list(DH).find(function(x){return x.ambilId===id;});
-    if(!confirm('Hapus pengambilan #'+a.no+'? Stok premix dikembalikan'+(h?' dan hasil roti yang tercatat ikut dihapus.':'.'))) return;
+    if(!confirm('Hapus pengambilan #'+a.no+'? Stok premix dikembalikan'+(h?' dan stok kemasan/hasil roti dikembalikan.':'.'))) return;
+    
+    // Kembalikan stok premix
     var tids=a.items.map(function(i){return i.trxId;}).filter(Boolean);
+    // Kembalikan stok kemasan jika ada
+    if(h && h.trxKemasanIds) {
+      tids = tids.concat(h.trxKemasanIds);
+    }
+    
     trx=trx.filter(function(t){return tids.indexOf(t.id)<0;});
     if(h) produksi=produksi.filter(function(p){return p.id!==h.produksiId;});
     riwayatEdit=riwayatEdit.filter(function(r){return r.id!==a.id&&!(h&&r.id===h.id);});
     await save('trx',trx); if(h) await save('produksi',produksi); await save('riwayatEdit',riwayatEdit);
     if(S.pickId===id) S.pickId=null; renderAll();
   }
+
   async function bukaLagi(hid){
     var h=list(DH).find(function(x){return x.id===hid;}); if(!h) return;
-    if(!confirm('Buka lagi? Hasil roti yang sudah dicatat dihapus dari Produksi, lalu bisa diisi ulang.')) return;
+    if(!confirm('Buka lagi? Hasil roti dan pemotongan stok kemasan akan dibatalkan, lalu bisa diisi ulang.')) return;
     var a=list(DA).find(function(x){return x.id===h.ambilId;});
+    
+    // Hapus transaksi pemotongan kemasan jika ada
+    if(h.trxKemasanIds && h.trxKemasanIds.length > 0) {
+      trx = trx.filter(function(t){ return h.trxKemasanIds.indexOf(t.id) < 0; });
+      await save('trx', trx);
+    }
+
     produksi=produksi.filter(function(p){return p.id!==h.produksiId;});
     riwayatEdit=riwayatEdit.filter(function(r){return r.id!==h.id;});
     if(a) a.status='OPEN';
@@ -4709,5 +4799,3 @@ subscribeRealtime = function(){
     if(p&&p.rekonKodeId){e.stopImmediatePropagation();e.preventDefault();alert('Produksi ini berasal dari tab Rekon Kode. Ubah/hapus lewat tab Rekon Kode (Buka Lagi / Hapus).');}
   },true);
 })();
-</script>
-
