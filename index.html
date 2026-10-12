@@ -4509,124 +4509,164 @@ subscribeRealtime = function(){
   renderAll();
 })();
 <script>
-/* ===== HUTANG PER BULAN (tab Masuk) =====
-   Tempel di PALING BAWAH index.html, sesudah </script> terakhir (sebelum </body>).
-   - Tidak perlu tabel baru di Supabase: status bayar disimpan di data transaksi Masuk (trx).
-   - Data lama otomatis dianggap LUNAS. Yang hutang tinggal diubah statusnya jadi "Hutang".
-   - Nilai transaksi = harga barang x jumlah (sama dengan hitungan di Menu/Laporan). */
 (function(){
-  let hutangBulan = new Date().toISOString().slice(0,7); // '' = semua bulan
-  let hutangSupplier = '';
-  let hutangHanya = false;
+  var hutangBulan = new Date().toISOString().slice(0,7);
+  var hutangDari = '';
+  var hutangSampai = '';
+  var hutangSupplier = '';
+  var hutangHanya = false;
 
-  const BLN = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
-  const namaBulan = ym => { const p=(ym||'').split('-'); return p.length===2 ? BLN[(+p[1])-1]+' '+p[0] : (ym||'-'); };
-  const supOf = t => t.supplier || t.cv || '-';   // kalau nama field supplier di data kamu beda, ganti di sini
-  const totalOf = t => { const it=itemById(t.itemId); return it ? (it.harga||0)*(t.qty||0) : 0; };
-  const statusOf = t => t.statusBayar==='hutang' ? 'hutang' : 'lunas';
-  const dibayarOf = t => statusOf(t)==='lunas' ? totalOf(t) : Math.min(totalOf(t), parseFloat(t.dibayar)||0);
-  const sisaOf = t => totalOf(t) - dibayarOf(t);
-  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  var BLN = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+  function namaBulan(ym){ var p=(ym||'').split('-'); return p.length===2 ? BLN[(+p[1])-1]+' '+p[0] : (ym||'-'); }
+  function pad2(n){ return (n<10?'0':'')+n; }
+  function supOf(t){ return t.supplier || t.cv || '-'; }
+  function totalOf(t){ var it=itemById(t.itemId); return it ? (it.harga||0)*(t.qty||0) : 0; }
+  function statusOf(t){ return t.statusBayar==='hutang' ? 'hutang' : 'lunas'; }
+  function dibayarOf(t){ return statusOf(t)==='lunas' ? totalOf(t) : Math.min(totalOf(t), parseFloat(t.dibayar)||0); }
+  function sisaOf(t){ return totalOf(t) - dibayarOf(t); }
+  var ESC_MAP = {'\x26':'\x26amp;','"':'\x26quot;','\x3c':'\x26lt;','\x3e':'\x26gt;'};
+  function esc(s){ return String(s==null?'':s).replace(/[\x26"\x3c\x3e]/g, function(c){ return ESC_MAP[c]; }); }
 
   function masukSemua(){
-    return trx.filter(t=>t.tipe==='masuk' && (!hutangSupplier || supOf(t)===hutangSupplier));
+    return trx.filter(function(t){ return t.tipe==='masuk' && (!hutangSupplier || supOf(t)===hutangSupplier); });
+  }
+  // kalau Dari/Sampai tanggal diisi, pakai itu; kalau tidak, pakai bulan
+  function dalamPeriode(t){
+    var tg = t.tanggal || '';
+    if(hutangDari || hutangSampai){
+      return (!hutangDari || tg>=hutangDari) && (!hutangSampai || tg<=hutangSampai);
+    }
+    return !hutangBulan || tg.slice(0,7)===hutangBulan;
   }
 
-  function pasangHutang(){
+  function pasangHutangInti(){
     if(activeTab!=='masuk') return;
-    const main = document.getElementById('main'); if(!main) return;
-    const lama = document.getElementById('hutang-card'); if(lama) lama.remove();
+    var main = document.getElementById('main'); if(!main) return;
+    var lama = document.getElementById('hutang-card'); if(lama) lama.remove();
 
-    // --- rekap per bulan (semua bulan) ---
-    const per = {};
-    masukSemua().forEach(t=>{
-      const b = (t.tanggal||'').slice(0,7) || '-';
+    var per = {};
+    masukSemua().forEach(function(t){
+      var b = (t.tanggal||'').slice(0,7) || '-';
       per[b] = per[b] || {total:0, bayar:0};
       per[b].total += totalOf(t); per[b].bayar += dibayarOf(t);
     });
-    const rekapRows = Object.keys(per).sort().reverse().map(b=>{
-      const sisa = per[b].total - per[b].bayar;
-      return `<tr data-bulan="${b}" style="cursor:pointer;${b===hutangBulan?'background:rgb(251,243,225);':''}">
-        <td>${namaBulan(b)}</td><td>${rupiah(per[b].total)}</td><td>${rupiah(per[b].bayar)}</td>
-        <td class="${sisa>0?'sisa-low':'sisa-ok'}">${rupiah(sisa)}</td></tr>`;
+    var rekapRows = Object.keys(per).sort().reverse().map(function(b){
+      var sisa = per[b].total - per[b].bayar;
+      return '<tr data-bulan="'+b+'" style="cursor:pointer;'+(b===hutangBulan&&!hutangDari&&!hutangSampai?'background:rgb(251,243,225);':'')+'">'
+        +'<td>'+namaBulan(b)+'</td><td>'+rupiah(per[b].total)+'</td><td>'+rupiah(per[b].bayar)+'</td>'
+        +'<td class="'+(sisa>0?'sisa-low':'sisa-ok')+'">'+rupiah(sisa)+'</td></tr>';
     }).join('');
 
-    // --- detail bulan terpilih ---
-    const data = masukSemua().filter(t=> !hutangBulan || (t.tanggal||'').slice(0,7)===hutangBulan);
-    const total = data.reduce((s,t)=>s+totalOf(t),0);
-    const bayar = data.reduce((s,t)=>s+dibayarOf(t),0);
-    const sisa = total - bayar;
-    const rows = data.filter(t=>!hutangHanya || sisaOf(t)>0)
-      .sort((a,b)=>(b.tanggal||'').localeCompare(a.tanggal||''))
-      .map(t=>{
-        const it = itemById(t.itemId);
-        const st = statusOf(t);
-        return `<tr>
-          <td>${esc(t.tanggal)}</td>
-          <td>${it ? esc(it.kode+' - '+it.nama) : '(barang dihapus)'}</td>
-          <td>${(t.qty||0).toLocaleString('id-ID')} ${it?esc(it.satuan):''}</td>
-          <td>${esc(supOf(t))}</td>
-          <td>${rupiah(totalOf(t))}</td>
-          <td><select class="hutang-status" data-id="${t.id}">
-                <option value="lunas" ${st==='lunas'?'selected':''}>Lunas</option>
-                <option value="hutang" ${st==='hutang'?'selected':''}>Hutang</option></select></td>
-          <td>${st==='hutang' ? `<input type="number" min="0" class="hutang-bayar" data-id="${t.id}" value="${parseFloat(t.dibayar)||0}" style="width:110px;">` : '-'}</td>
-          <td class="${sisaOf(t)>0?'sisa-low':'sisa-ok'}">${rupiah(sisaOf(t))}</td></tr>`;
+    var data = masukSemua().filter(dalamPeriode);
+    var total = data.reduce(function(s,t){ return s+totalOf(t); },0);
+    var bayar = data.reduce(function(s,t){ return s+dibayarOf(t); },0);
+    var sisaTotal = total - bayar;
+    var labelPeriode = (hutangDari||hutangSampai) ? ((hutangDari||'awal')+' s/d '+(hutangSampai||'sekarang')) : (hutangBulan?namaBulan(hutangBulan):'Semua Bulan');
+
+    var mingguHtml = '';
+    if(hutangBulan){
+      var yy = +hutangBulan.slice(0,4), mm = +hutangBulan.slice(5,7);
+      var akhir = new Date(yy, mm, 0).getDate();
+      var rg = [[1,7],[8,14],[15,21],[22,akhir]];
+      mingguHtml = rg.map(function(r,i){
+        var d1 = hutangBulan+'-'+pad2(r[0]), d2 = hutangBulan+'-'+pad2(r[1]);
+        var aktif = (hutangDari===d1 && hutangSampai===d2);
+        return '<button class="primary hutang-minggu" type="button" data-dari="'+d1+'" data-sampai="'+d2+'" style="'+(aktif?'':'opacity:0.55;')+'">Minggu '+(i+1)+' (tgl '+r[0]+'-'+r[1]+')</button>';
+      }).join(' ');
+    }
+
+    var rows = data.filter(function(t){ return !hutangHanya || sisaOf(t)>0; })
+      .sort(function(a,b){ return (b.tanggal||'').localeCompare(a.tanggal||''); })
+      .map(function(t){
+        var it = itemById(t.itemId);
+        var st = statusOf(t);
+        return '<tr>'
+          +'<td>'+esc(t.tanggal)+'</td>'
+          +'<td>'+(it ? esc(it.kode+' - '+it.nama) : '(barang dihapus)')+'</td>'
+          +'<td>'+(t.qty||0).toLocaleString('id-ID')+' '+(it?esc(it.satuan):'')+'</td>'
+          +'<td>'+esc(supOf(t))+'</td>'
+          +'<td>'+rupiah(totalOf(t))+'</td>'
+          +'<td><select class="hutang-status" data-id="'+t.id+'">'
+          +'<option value="lunas"'+(st==='lunas'?' selected':'')+'>Lunas</option>'
+          +'<option value="hutang"'+(st==='hutang'?' selected':'')+'>Hutang</option></select></td>'
+          +'<td>'+(st==='hutang' ? '<input type="number" min="0" class="hutang-bayar" data-id="'+t.id+'" value="'+(parseFloat(t.dibayar)||0)+'" style="width:110px;">' : '-')+'</td>'
+          +'<td class="'+(sisaOf(t)>0?'sisa-low':'sisa-ok')+'">'+rupiah(sisaOf(t))+'</td></tr>';
       }).join('');
 
-    const supOpts = (typeof SUPPLIERS!=='undefined'?SUPPLIERS:[]).map(s=>`<option value="${esc(s)}" ${s===hutangSupplier?'selected':''}>${esc(s)}</option>`).join('');
+    var daftarSup = (typeof SUPPLIERS!=='undefined') ? SUPPLIERS : [];
+    var supOpts = daftarSup.map(function(s){ return '<option value="'+esc(s)+'"'+(s===hutangSupplier?' selected':'')+'>'+esc(s)+'</option>'; }).join('');
 
-    const html = `<div class="card" id="hutang-card">
-      <h2>Hutang Pembelian per Bulan</h2>
-      <div class="sub">Pilih bulan untuk melihat berapa total pembelian, yang sudah dibayar, dan sisa hutangnya. Ubah status tiap barang di tabel (Lunas / Hutang). Kalau Hutang, isi jumlah yang sudah dibayar (kalau dicicil).</div>
-      <form class="inline" onsubmit="return false;">
-        <div class="field"><label>Bulan</label><input type="month" id="hutang-bulan" value="${hutangBulan}"></div>
-        <div class="field"><label>Supplier / CV</label><select id="hutang-supplier"><option value="">Semua</option>${supOpts}</select></div>
-        <div class="field"><label>&nbsp;</label><label style="font-weight:400;"><input type="checkbox" id="hutang-hanya" ${hutangHanya?'checked':''}> Tampilkan yang hutang saja</label></div>
-        <button class="primary" type="button" id="hutang-semua">Semua Bulan</button>
-      </form>
-      <div class="grid" style="margin:12px 0;">
-        <div class="stat"><div class="label">Total Pembelian (${hutangBulan?namaBulan(hutangBulan):'Semua Bulan'})</div><div class="value">${rupiah(total)}</div></div>
-        <div class="stat pos"><div class="label">Sudah Dibayar</div><div class="value">${rupiah(bayar)}</div></div>
-        <div class="stat ${sisa>0?'neg':'pos'}"><div class="label">Sisa Hutang</div><div class="value">${rupiah(sisa)}</div></div>
-      </div>
-      <table><thead><tr><th>Tanggal</th><th>Barang</th><th>Jumlah</th><th>Supplier</th><th>Nilai</th><th>Status</th><th>Sudah Dibayar</th><th>Sisa</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="8" class="empty">Tidak ada data di bulan ini</td></tr>'}</tbody></table>
-      <h3 style="font-size:13px;margin:16px 0 4px 0;">Rekap Hutang Semua Bulan <span style="font-weight:400;color:var(--brown-soft);">(klik baris untuk melihat detail bulan itu)</span></h3>
-      <table><thead><tr><th>Bulan</th><th>Total Pembelian</th><th>Sudah Dibayar</th><th>Sisa Hutang</th></tr></thead>
-      <tbody>${rekapRows || '<tr><td colspan="4" class="empty">Belum ada pembelian</td></tr>'}</tbody></table>
-    </div>`;
+    var html = '<div class="card" id="hutang-card">'
+      +'<h2>Hutang Pembelian per Bulan / Minggu / Tanggal</h2>'
+      +'<div class="sub">Pilih bulan, lalu klik Minggu 1-4 untuk lihat hutang per minggu. Atau isi Dari Tanggal - Sampai Tanggal sendiri. Ubah status tiap barang di tabel (Lunas / Hutang). Kalau Hutang, isi jumlah yang sudah dibayar (kalau dicicil).</div>'
+      +'<form class="inline" onsubmit="return false;">'
+      +'<div class="field"><label>Bulan</label><input type="month" id="hutang-bulan" value="'+hutangBulan+'"></div>'
+      +'<div class="field"><label>Dari Tanggal</label><input type="date" id="hutang-dari" value="'+hutangDari+'"></div>'
+      +'<div class="field"><label>Sampai Tanggal</label><input type="date" id="hutang-sampai" value="'+hutangSampai+'"></div>'
+      +'<div class="field"><label>Supplier / CV</label><select id="hutang-supplier"><option value="">Semua</option>'+supOpts+'</select></div>'
+      +'<div class="field"><label>Filter</label><label style="font-weight:400;"><input type="checkbox" id="hutang-hanya"'+(hutangHanya?' checked':'')+'> Hanya yang hutang</label></div>'
+      +'<button class="primary" type="button" id="hutang-semua">Semua Bulan</button>'
+      +'</form>'
+      +(mingguHtml ? '<div style="margin:10px 0;display:flex;gap:6px;flex-wrap:wrap;">'+mingguHtml+'<button class="primary hutang-minggu" type="button" data-dari="" data-sampai="" style="'+((hutangDari||hutangSampai)?'opacity:0.55;':'')+'">Satu Bulan Penuh</button></div>' : '')
+      +'<div class="grid" style="margin:12px 0;">'
+      +'<div class="stat"><div class="label">Total Pembelian ('+labelPeriode+')</div><div class="value">'+rupiah(total)+'</div></div>'
+      +'<div class="stat pos"><div class="label">Sudah Dibayar</div><div class="value">'+rupiah(bayar)+'</div></div>'
+      +'<div class="stat '+(sisaTotal>0?'neg':'pos')+'"><div class="label">Sisa Hutang</div><div class="value">'+rupiah(sisaTotal)+'</div></div>'
+      +'</div>'
+      +'<table><thead><tr><th>Tanggal</th><th>Barang</th><th>Jumlah</th><th>Supplier</th><th>Nilai</th><th>Status</th><th>Sudah Dibayar</th><th>Sisa</th></tr></thead>'
+      +'<tbody>'+(rows || '<tr><td colspan="8" class="empty">Tidak ada data di periode ini</td></tr>')+'</tbody></table>'
+      +'<h3 style="font-size:13px;margin:16px 0 4px 0;">Rekap Hutang Semua Bulan (klik baris untuk lihat detail bulan itu)</h3>'
+      +'<table><thead><tr><th>Bulan</th><th>Total Pembelian</th><th>Sudah Dibayar</th><th>Sisa Hutang</th></tr></thead>'
+      +'<tbody>'+(rekapRows || '<tr><td colspan="4" class="empty">Belum ada pembelian</td></tr>')+'</tbody></table>'
+      +'</div>';
 
     main.insertAdjacentHTML('afterbegin', html);
-    const card = document.getElementById('hutang-card');
+    var card = document.getElementById('hutang-card');
 
-    card.addEventListener('change', async e=>{
-      const el = e.target;
-      if(el.id==='hutang-bulan'){ hutangBulan = el.value; return pasangHutang(); }
-      if(el.id==='hutang-supplier'){ hutangSupplier = el.value; return pasangHutang(); }
-      if(el.id==='hutang-hanya'){ hutangHanya = el.checked; return pasangHutang(); }
-      if(el.classList.contains('hutang-status')){
-        const t = trx.find(x=>x.id===el.dataset.id); if(!t) return;
-        t.statusBayar = el.value;
-        if(el.value==='hutang' && t.dibayar==null) t.dibayar = 0;
-        await save('trx', trx); return pasangHutang();
-      }
-      if(el.classList.contains('hutang-bayar')){
-        const t = trx.find(x=>x.id===el.dataset.id); if(!t) return;
-        t.dibayar = Math.max(0, parseFloat(el.value)||0);
-        await save('trx', trx); return pasangHutang();
-      }
+    card.addEventListener('change', async function(e){
+      try{
+        var el = e.target, t;
+        if(el.id==='hutang-bulan'){ hutangBulan = el.value; hutangDari=''; hutangSampai=''; return pasangHutang(); }
+        if(el.id==='hutang-dari'){ hutangDari = el.value; return pasangHutang(); }
+        if(el.id==='hutang-sampai'){ hutangSampai = el.value; return pasangHutang(); }
+        if(el.id==='hutang-supplier'){ hutangSupplier = el.value; return pasangHutang(); }
+        if(el.id==='hutang-hanya'){ hutangHanya = el.checked; return pasangHutang(); }
+        if(el.classList.contains('hutang-status')){
+          t = trx.find(function(x){ return x.id===el.dataset.id; }); if(!t) return;
+          t.statusBayar = el.value;
+          if(el.value==='hutang' && t.dibayar==null) t.dibayar = 0;
+          await save('trx', trx); return pasangHutang();
+        }
+        if(el.classList.contains('hutang-bayar')){
+          t = trx.find(function(x){ return x.id===el.dataset.id; }); if(!t) return;
+          t.dibayar = Math.max(0, parseFloat(el.value)||0);
+          await save('trx', trx); return pasangHutang();
+        }
+      }catch(err){ console.error('Hutang:', err); alert('Fitur hutang error: '+err.message); }
     });
-    card.addEventListener('click', e=>{
-      if(e.target.id==='hutang-semua'){ hutangBulan=''; return pasangHutang(); }
-      const r = e.target.closest('tr[data-bulan]');
-      if(r){ hutangBulan = r.dataset.bulan; pasangHutang(); }
+    card.addEventListener('click', function(e){
+      if(e.target.id==='hutang-semua'){ hutangBulan=''; hutangDari=''; hutangSampai=''; return pasangHutang(); }
+      var mg = e.target.closest('.hutang-minggu');
+      if(mg){ hutangDari = mg.dataset.dari; hutangSampai = mg.dataset.sampai; return pasangHutang(); }
+      var r = e.target.closest('tr[data-bulan]');
+      if(r){ hutangBulan = r.dataset.bulan; hutangDari=''; hutangSampai=''; pasangHutang(); }
     });
   }
 
-  // pasang ke renderAll supaya kartu ini muncul tiap kali tab Masuk dibuka / data berubah
-  const renderAllAsli = window.renderAll;
+  function pasangHutang(){
+    try{ pasangHutangInti(); }
+    catch(err){
+      console.error('Hutang:', err);
+      var main = document.getElementById('main');
+      var lama = document.getElementById('hutang-card'); if(lama) lama.remove();
+      if(main && activeTab==='masuk'){
+        main.insertAdjacentHTML('afterbegin','<div class="card" id="hutang-card"><b>Fitur hutang error:</b> '+esc(err.message)+'</div>');
+      }
+    }
+  }
+
+  var renderAllAsli = window.renderAll;
   window.renderAll = function(){ renderAllAsli(); pasangHutang(); };
   pasangHutang();
-
-   
+})();
+</script>
