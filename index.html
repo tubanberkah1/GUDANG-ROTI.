@@ -4530,7 +4530,7 @@ subscribeRealtime = function(){
   function masukSemua(){
     return trx.filter(function(t){ return t.tipe==='masuk' && (!hutangSupplier || supOf(t)===hutangSupplier); });
   }
-  // kalau Dari/Sampai tanggal diisi, pakai itu; kalau tidak, pakai bulan
+
   function dalamPeriode(t){
     var tg = t.tanggal || '';
     if(hutangDari || hutangSampai){
@@ -4540,7 +4540,7 @@ subscribeRealtime = function(){
   }
 
   function pasangHutangInti(){
-    if(activeTab!=='masuk') return;
+    if(typeof activeTab !== 'undefined' && activeTab !== 'masuk') return;
     var main = document.getElementById('main'); if(!main) return;
     var lama = document.getElementById('hutang-card'); if(lama) lama.remove();
 
@@ -4659,14 +4659,17 @@ subscribeRealtime = function(){
       console.error('Hutang:', err);
       var main = document.getElementById('main');
       var lama = document.getElementById('hutang-card'); if(lama) lama.remove();
-      if(main && activeTab==='masuk'){
+      if(main && (typeof activeTab === 'undefined' || activeTab==='masuk')){
         main.insertAdjacentHTML('afterbegin','<div class="card" id="hutang-card"><b>Fitur hutang error:</b> '+esc(err.message)+'</div>');
       }
     }
   }
 
-  var renderAllAsli = window.renderAll;
-  window.renderAll = function(){ renderAllAsli(); pasangHutang(); };
+  if(typeof window.renderAll !== 'undefined'){
+    var renderAllAsli = window.renderAll;
+    window.renderAll = function(){ renderAllAsli(); pasangHutang(); };
+  }
+  
   pasangHutang();
 })();
 </script>
