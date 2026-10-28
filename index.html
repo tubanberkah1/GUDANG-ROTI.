@@ -4671,3 +4671,247 @@ subscribeRealtime = function(){
   pasangHutang();
 })();
 </script>
+<script>
+// ===== PACKING SATU FORM: ROTI DIKEMAS + KARDUS KELUAR (+ Edit & Riwayat Edit) =====
+(function(){
+  const URUTAN = ['Tuban','Jatirogo','Merakurak','Pesanan','Stock Toko','Palang'];
+  URUTAN.forEach(t=>{ if(!TUJUAN_PACKING.includes(t)) TUJUAN_PACKING.push(t); });
+
+  let itemId = '', tanggal = '', ket = '';
+  let pcs = {};      // pcs[namaVarian][tujuan]
+  let krd = {};      // krd[tujuan] = jumlah kardus
+  let editId = null, draft = null;
+  const el = id => document.getElementById(id);
+  const esc = s => String(s==null?'':s).replace(/"/g,'&quot;');
+  function resetForm(){ pcs = {}; krd = {}; ket = ''; tanggal = ''; }
+  const kardusItems = () => items.filter(i=>i.kategori==='kardus'||i.kategori==='bahan');
+  const optsItem = sel => kardusItems().map(it=>`<option value="${it.id}" ${it.id===sel?'selected':''}>${it.kode} - ${it.nama} (${it.satuan})</option>`).join('');
+  const rinciTxt = arr => (arr||[]).filter(v=>v.jumlah>0).map(v=>v.nama+': '+v.jumlah.toLocaleString('id-ID')).join(', ');
+
+  function kardusTxt(p){
+    const list = p.bahanList && p.bahanList.length>0 ? p.bahanList : (p.kardusItemId ? [{itemId:p.kardusItemId, qty:p.qtyKardus}] : []);
+    return list.map(b=>{ const it=itemById(b.itemId); return (it?it.nama:'(barang dihapus)')+': '+(b.qty||0).toLocaleString('id-ID')+(it?' '+it.satuan:''); }).join(', ') || '-';
+  }
+
+  function tampil(){
+    if(!tanggal) tanggal = today();
+    const varian = semuaVarianNama();
+    const head = URUTAN.map(t=>`<th>${t}</th>`).join('');
+
+    const rowsV = varian.map(nama=>{
+      const s = stokVarianGudang(nama);
+      const cells = URUTAN.map(t=>`<td><input type="number" min="0" class="pkd-q" data-nama="${esc(nama)}" data-t="${t}" value="${(pcs[nama]&&pcs[nama][t])||''}" placeholder="0" style="width:64px;"></td>`).join('');
+      return `<tr><td>${nama}</td><td class="${s.sisa<0?'sisa-low':'sisa-ok'}">${s.sisa.toLocaleString('id-ID')} pcs</td>${cells}<td><b class="pkd-rowtotal" data-nama="${esc(nama)}">0</b></td></tr>`;
+    }).join('');
+    const kardusCells = URUTAN.map(t=>`<td><input type="number" min="0" step="any" class="pkd-k" data-t="${t}" value="${krd[t]||''}" placeholder="0" style="width:64px;"></td>`).join('');
+
+    const riwayat = packing.slice().sort((a,b)=>b.tanggal.localeCompare(a.tanggal)).map((p,idx)=>{
+      const totalPcs = (p.varian||[]).reduce((s,v)=>s+v.jumlah,0);
+      const log = riwayatEditUntuk('packing', p.id);
+      const logRow = log.length>0 ? `<tr><td colspan="7"><div class="note"><b>Riwayat edit:</b><ul style="margin:4px 0 0 16px;padding:0;">${log.map(r=>`<li>${new Date(r.waktu).toLocaleString('id-ID')} — ${r.perubahan.join('; ')}</li>`).join('')}</ul></div></td></tr>` : '';
+
+      if(editId===p.id && draft){
+        const cabList = (!draft.cabang || URUTAN.includes(draft.cabang)) ? URUTAN : [draft.cabang].concat(URUTAN);
+        const cabOpts = cabList.map(c=>`<option ${c===draft.cabang?'selected':''}>${c}</option>`).join('');
+        const nama = Array.from(new Set(semuaVarianNama().concat(Object.keys(draft.pcs))));
+        const rotiEdit = `<div style="display:flex;flex-wrap:wrap;gap:6px;">${nama.map(n=>`<label style="font-size:11.5px;">${n}<br><input type="number" min="0" class="pkd-e-pcs" data-nama="${esc(n)}" value="${draft.pcs[n]||''}" style="width:70px;"></label>`).join('')}</div>`;
+        const kardusEdit = draft.kEditable
+          ? `<select id="pkd-e-kitem" style="min-width:180px;"><option value="">-- pilih kardus --</option>${optsItem(draft.kItem)}</select> <input type="number" min="0" step="any" id="pkd-e-kqty" value="${draft.kQty}" style="width:80px;">`
+          : `<span class="note">${kardusTxt(p)}<br>Data lama: kardus tidak bisa diubah di sini. Hapus lalu catat ulang.</span>`;
+        return `<tr>
+          <td>${idx+1}</td>
+          <td><input type="date" id="pkd-e-tgl" value="${draft.tanggal}" style="width:130px;"></td>
+          <td><select id="pkd-e-cab">${cabOpts}</select></td>
+          <td>${rotiEdit}</td>
+          <td>${kardusEdit}</td>
+          <td><input type="text" id="pkd-e-ket" value="${esc(draft.ket)}" style="width:110px;"></td>
+          <td><button class="primary" id="pkd-e-simpan" style="padding:5px 10px;">Simpan</button> <button class="danger" id="pkd-e-batal">Batal</button></td>
+        </tr>${logRow}`;
+      }
+      return `<tr><td>${idx+1}</td><td>${p.tanggal}</td><td>${p.cabang||'-'}</td>
+        <td>${totalPcs>0 ? totalPcs.toLocaleString('id-ID')+' pcs<div class="note" style="margin:2px 0 0 0;">'+rinciTxt(p.varian)+'</div>' : '-'}</td>
+        <td>${kardusTxt(p)}</td><td>${p.ket||'-'}</td>
+        <td><button class="danger" style="color:var(--blue)" data-pkd-edit="${p.id}">Edit</button> <button class="danger" data-pkd-del="${p.id}">Hapus</button></td></tr>${logRow}`;
+    }).join('');
+
+    return `
+    <form id="form-packing" style="display:none;"></form>
+    <div class="card">
+      <h2>Packing (Roti Dikemas + Kardus Keluar)</h2>
+      <div class="sub">Isi pcs roti di samping tiap varian, di kolom tujuannya. Lalu isi jumlah kardus di baris paling bawah. Sekali Simpan, roti tercatat sudah dikemas dan stok kardus berkurang.</div>
+      <div class="inline" style="margin-bottom:10px;">
+        <div class="field"><label>Tanggal</label><input type="date" id="pkd-tanggal" value="${tanggal}"></div>
+        <div class="field"><label>Jenis Kardus</label><select id="pkd-item" style="min-width:240px;"><option value="">-- pilih kardus --</option>${optsItem(itemId)}</select></div>
+        <div class="field"><label>Keterangan</label><input type="text" id="pkd-ket" value="${esc(ket)}" placeholder="opsional"></div>
+      </div>
+      <div style="overflow-x:auto;">
+      <table><thead><tr><th>Varian Roti</th><th>Belum Dikemas</th>${head}<th>Total</th></tr></thead>
+      <tbody>${rowsV || `<tr><td colspan="${URUTAN.length+3}" class="empty">Belum ada hasil produksi</td></tr>`}
+      <tr style="background:var(--cream);"><td><b>Jumlah Kardus</b></td><td></td>${kardusCells}<td><b id="pkd-kardus-total">0</b></td></tr></tbody></table>
+      </div>
+      <div style="margin-top:10px;"><button type="button" class="primary" id="pkd-simpan">Simpan Packing</button></div>
+    </div>
+    <div class="card">
+      <h2>Riwayat Packing (${packing.length})</h2>
+      <div style="overflow-x:auto;">
+      <table><thead><tr><th>No</th><th>Tanggal</th><th>Tujuan</th><th>Roti Dikemas</th><th>Kardus</th><th>Ket</th><th></th></tr></thead>
+      <tbody>${riwayat || '<tr><td colspan="7" class="empty">Belum ada packing</td></tr>'}</tbody></table>
+      </div>
+    </div>`;
+  }
+
+  function hitung(){
+    const rowTot = {};
+    document.querySelectorAll('.pkd-q').forEach(i=>{ rowTot[i.dataset.nama] = (rowTot[i.dataset.nama]||0) + (parseFloat(i.value)||0); });
+    document.querySelectorAll('.pkd-rowtotal').forEach(b=>{ b.textContent = (rowTot[b.dataset.nama]||0).toLocaleString('id-ID'); });
+    let k = 0; document.querySelectorAll('.pkd-k').forEach(i=>{ k += parseFloat(i.value)||0; });
+    const kt = el('pkd-kardus-total'); if(kt) kt.textContent = k.toLocaleString('id-ID');
+  }
+
+  async function simpan(){
+    const tgl = el('pkd-tanggal').value || today();
+    const catatan = el('pkd-ket').value.trim();
+    const per = {}; URUTAN.forEach(t=>per[t]={varian:[], kardus:0});
+    const totalVarian = {};
+    document.querySelectorAll('.pkd-q').forEach(i=>{
+      const n = parseFloat(i.value)||0;
+      if(n>0){ per[i.dataset.t].varian.push({nama:i.dataset.nama, jumlah:n}); totalVarian[i.dataset.nama]=(totalVarian[i.dataset.nama]||0)+n; }
+    });
+    let totalKardus = 0;
+    document.querySelectorAll('.pkd-k').forEach(i=>{ const n=parseFloat(i.value)||0; per[i.dataset.t].kardus=n; totalKardus+=n; });
+
+    const aktif = URUTAN.filter(t=>per[t].varian.length>0 || per[t].kardus>0);
+    if(aktif.length===0){ alert('Belum ada yang diisi.'); return; }
+    if(totalKardus>0 && !itemId){ alert('Pilih jenis kardus dulu.'); return; }
+
+    const tanpaKardus = aktif.filter(t=>per[t].varian.length>0 && per[t].kardus<=0);
+    if(tanpaKardus.length>0 && !confirm('Roti sudah diisi tapi kardus masih kosong untuk: '+tanpaKardus.join(', ')+'. Tetap simpan?')) return;
+    const lebih = Object.keys(totalVarian).filter(n=>totalVarian[n] > stokVarianGudang(n).sisa);
+    if(lebih.length>0 && !confirm('Jumlah packing melebihi sisa belum dikemas untuk: '+lebih.join(', ')+'. Tetap simpan?')) return;
+    if(totalKardus>0 && stokItem(itemId).sisa < totalKardus && !confirm('Jumlah kardus melebihi stok kardus. Tetap simpan?')) return;
+
+    const btn = el('pkd-simpan'); btn.disabled = true; btn.textContent = 'Menyimpan...';
+    try{
+      for(const t of aktif){
+        const rec = {id:uid(), tanggal:tgl, cabang:t, varian:per[t].varian, bahanList:[], ket:catatan};
+        if(per[t].kardus>0){
+          const tr = await tambahTrx({tanggal:tgl, itemId, tipe:'keluar', qty:per[t].kardus, ket:'Packing ke '+t});
+          rec.bahanList.push({itemId, qty:per[t].kardus, trxId:tr.id});
+        }
+        packing.push(rec);
+      }
+      await save('packing', packing);
+      resetForm();
+    }catch(e){ console.error(e); alert('Gagal menyimpan packing. Cek koneksi, lalu cek Riwayat sebelum mengulang.'); }
+    renderAll();
+  }
+
+  async function hapus(id){
+    const p = packing.find(x=>x.id===id); if(!p) return;
+    const punyaLink = p.bahanList && p.bahanList.length>0;
+    if(!confirm('Hapus packing ke '+(p.cabang||'-')+' tanggal '+p.tanggal+'? Roti kembali jadi belum dikemas.'+(punyaLink?' Stok kardus juga dikembalikan.':' (Data lama: stok kardus tidak otomatis kembali, cek di tab Keluar.)'))) return;
+    if(punyaLink){
+      const ids = p.bahanList.map(b=>b.trxId).filter(Boolean);
+      if(ids.length>0){ trx = trx.filter(t=>!ids.includes(t.id)); await save('trx', trx); }
+    }
+    packing = packing.filter(x=>x.id!==id);
+    await save('packing', packing);
+    renderAll();
+  }
+
+  function mulaiEdit(id){
+    const p = packing.find(x=>x.id===id); if(!p) return;
+    editId = id;
+    const bl = p.bahanList || [];
+    const legacyTanpaTrx = !!p.kardusItemId && bl.length===0;
+    const kEditable = !legacyTanpaTrx && bl.length<=1;
+    const b0 = bl[0];
+    const pm = {}; (p.varian||[]).forEach(v=>{ pm[v.nama]=v.jumlah; });
+    draft = { tanggal:p.tanggal, cabang:p.cabang||'', ket:p.ket||'', pcs:pm, kEditable, kItem:b0?b0.itemId:'', kQty:b0?b0.qty:'' };
+    renderAll();
+  }
+
+  async function simpanEdit(){
+    const p = packing.find(x=>x.id===editId); if(!p || !draft) return;
+    const d = draft;
+    if(!d.tanggal){ alert('Tanggal belum diisi.'); return; }
+
+    const baru = Object.keys(d.pcs).map(n=>({nama:n, jumlah:parseFloat(d.pcs[n])||0})).filter(x=>x.jumlah>0);
+    let kQty = 0;
+    if(d.kEditable){ kQty = parseFloat(d.kQty)||0; if(kQty>0 && !d.kItem){ alert('Pilih jenis kardus.'); return; } }
+    const adaKardusLama = (p.bahanList||[]).length>0 || !!p.kardusItemId;
+    if(baru.length===0 && kQty<=0 && (!d.kEditable ? !adaKardusLama : true)){ alert('Roti dan kardus kosong semua. Untuk membatalkan packing, pakai Hapus.'); return; }
+
+    // cek stok roti (hanya tambahan dibanding catatan lama)
+    const lamaMap = {}; (p.varian||[]).forEach(v=>{ lamaMap[v.nama]=(lamaMap[v.nama]||0)+v.jumlah; });
+    const lebih = baru.filter(v=>{ const delta = v.jumlah-(lamaMap[v.nama]||0); return delta>0 && stokVarianGudang(v.nama).sisa < delta; }).map(v=>v.nama);
+    if(lebih.length>0 && !confirm('Jumlah melebihi sisa belum dikemas untuk: '+lebih.join(', ')+'. Tetap simpan?')) return;
+    // cek stok kardus
+    if(d.kEditable && kQty>0){
+      const b0 = (p.bahanList||[])[0];
+      const lamaK = (b0 && b0.itemId===d.kItem) ? (b0.qty||0) : 0;
+      if(kQty-lamaK>0 && stokItem(d.kItem).sisa < kQty-lamaK && !confirm('Stok kardus tidak cukup untuk tambahan ini. Tetap simpan?')) return;
+    }
+
+    const kardusLamaTxt = kardusTxt(p);
+    const sebelum = { tanggal:p.tanggal, tujuan:p.cabang||'', ket:p.ket||'', roti:rinciTxt(p.varian)||'-', kardus:kardusLamaTxt };
+    const itBaru = d.kItem ? itemById(d.kItem) : null;
+    const sesudah = { tanggal:d.tanggal, tujuan:d.cabang, ket:d.ket, roti:rinciTxt(baru)||'-',
+      kardus: d.kEditable ? (kQty>0 ? ((itBaru?itBaru.nama:'?')+': '+kQty) : '-') : kardusLamaTxt };
+
+    const btn = el('pkd-e-simpan'); if(btn){ btn.disabled = true; btn.textContent = 'Menyimpan...'; }
+    try{
+      if(d.kEditable){
+        const b0 = (p.bahanList||[])[0];
+        if(kQty>0){
+          let t = (b0 && b0.trxId) ? trx.find(x=>x.id===b0.trxId) : null;
+          if(t){ t.itemId=d.kItem; t.qty=kQty; t.tanggal=d.tanggal; t.ket='Packing ke '+d.cabang; }
+          else { t = {id:uid(), tanggal:d.tanggal, itemId:d.kItem, tipe:'keluar', qty:kQty, ket:'Packing ke '+d.cabang}; trx.push(t); }
+          p.bahanList = [{itemId:d.kItem, qty:kQty, trxId:t.id}];
+        } else {
+          if(b0 && b0.trxId) trx = trx.filter(x=>x.id!==b0.trxId);
+          p.bahanList = [];
+        }
+        await save('trx', trx);
+      }
+      p.varian = baru; p.tanggal = d.tanggal; p.cabang = d.cabang; p.ket = d.ket;
+      await save('packing', packing);
+      await catatEdit('packing', p.id, 'Packing ke '+d.cabang+' '+d.tanggal, sebelum, sesudah);
+      editId = null; draft = null;
+    }catch(e){ console.error(e); alert('Gagal menyimpan perubahan. Cek koneksi, lalu cek data sebelum mengulang.'); }
+    renderAll();
+  }
+
+  function pasang(){
+    const main = el('main');
+    main.querySelectorAll('.pkd-q').forEach(i=>i.addEventListener('input',()=>{
+      (pcs[i.dataset.nama] = pcs[i.dataset.nama] || {})[i.dataset.t] = i.value; hitung();
+    }));
+    main.querySelectorAll('.pkd-k').forEach(i=>i.addEventListener('input',()=>{ krd[i.dataset.t] = i.value; hitung(); }));
+    const it = el('pkd-item'); if(it) it.addEventListener('change',()=>{ itemId = it.value; });
+    const tg = el('pkd-tanggal'); if(tg) tg.addEventListener('change',()=>{ tanggal = tg.value; });
+    const kt = el('pkd-ket'); if(kt) kt.addEventListener('input',()=>{ ket = kt.value; });
+    const sm = el('pkd-simpan'); if(sm) sm.addEventListener('click', simpan);
+    main.querySelectorAll('[data-pkd-del]').forEach(b=>b.addEventListener('click',()=>hapus(b.dataset.pkdDel)));
+    main.querySelectorAll('[data-pkd-edit]').forEach(b=>b.addEventListener('click',()=>mulaiEdit(b.dataset.pkdEdit)));
+    if(draft){
+      const a = el('pkd-e-tgl'); if(a) a.addEventListener('change',()=>{ draft.tanggal = a.value; });
+      const c = el('pkd-e-cab'); if(c) c.addEventListener('change',()=>{ draft.cabang = c.value; });
+      const k = el('pkd-e-ket'); if(k) k.addEventListener('input',()=>{ draft.ket = k.value; });
+      const ki = el('pkd-e-kitem'); if(ki) ki.addEventListener('change',()=>{ draft.kItem = ki.value; });
+      const kq = el('pkd-e-kqty'); if(kq) kq.addEventListener('input',()=>{ draft.kQty = kq.value; });
+      main.querySelectorAll('.pkd-e-pcs').forEach(i=>i.addEventListener('input',()=>{ draft.pcs[i.dataset.nama] = i.value; }));
+      const es = el('pkd-e-simpan'); if(es) es.addEventListener('click', simpanEdit);
+      const eb = el('pkd-e-batal'); if(eb) eb.addEventListener('click',()=>{ editId=null; draft=null; renderAll(); });
+    }
+    hitung();
+  }
+
+  window.viewPacking = tampil;
+  const _ah = window.attachHandlers;
+  window.attachHandlers = function(){
+    try{ _ah(); }catch(e){ console.warn('attachHandlers sebelumnya:', e); }
+    if(activeTab==='packing') pasang();
+  };
+})();
+</script>
