@@ -4915,3 +4915,524 @@ subscribeRealtime = function(){
   };
 })();
 </script>
+<script>
+// ===== PACKING PER CV: tujuan per cabang (Stock Toko / Pesanan) =====
+(function(){
+  const CABANG_P = ['Tuban','Merakurak','Jatirogo','Palang'];
+  const JENIS_P = ['Stock Toko','Pesanan'];
+  const DEST = [];
+  CABANG_P.forEach(c=>JENIS_P.forEach(j=>DEST.push({key:c+'|'+j, cabang:c, jenis:j, label:j+' '+c})));
+  CABANG_P.forEach(c=>{ if(!TUJUAN_PACKING.includes(c)) TUJUAN_PACKING.push(c); });
+
+  let cv='', itemId='', tanggal='', ket='', semuaRoti=false;
+  let pcs={}, krd={};
+  let editId=null, draft=null;
+  const el = id => document.getElementById(id);
+  const esc = s => String(s==null?'':s).replace(/"/g,'&quot;');
+  const kardusItems = () => items.filter(i=>i.kategori==='kardus'||i.kategori==='bahan');
+  const optsItem = sel => kardusItems().map(it=>`<option value="${it.id}" ${it.id===sel?'selected':''}>${it.kode} - ${it.nama} (${it.satuan})</option>`).join('');
+  const rinci = arr => (arr||[]).filter(v=>v.jumlah>0).map(v=>v.nama+': '+v.jumlah.toLocaleString('id-ID')).join(', ');
+  function resetForm(){ pcs={}; krd={}; ket=''; tanggal=''; }
+
+  function daftarCv(){
+    const set = {}; SUPPLIERS.forEach(s=>set[s]=1);
+    trx.forEach(t=>{ if(t.tipe==='masuk' && t.supplier) set[t.supplier]=1; });
+    return Object.keys(set);
+  }
+  function cvTerakhirBarang(itemId){
+    const l = trx.filter(t=>t.tipe==='masuk' && t.itemId===itemId && t.supplier).sort((a,b)=>String(b.tanggal).localeCompare(String(a.tanggal)));
+    return l.length ? l[0].supplier : '';
+  }
+  // varian roti yang berasal dari premix milik CV terpilih (CV diambil dari Barang Masuk)
+  function varianUntukCv(c){
+    if(semuaRoti || !c) return semuaVarianNama();
+    const set = {};
+    produksi.forEach(p=>{
+      if(cvTerakhirBarang(p.premixItemId)===c) (p.varianHasil||[]).forEach(v=>set[v.nama]=1);
+    });
+    return Object.keys(set).sort();
+  }
+  function tujuanTxt(p){
+    if(p.jenisTujuan) return p.jenisTujuan+' '+(p.cabang||'');
+    if(p.cabang==='Stock Toko') return 'Stock Toko (cabang tidak dicatat)';
+    if(p.cabang==='Pesanan') return 'Pesanan (cabang tidak dicatat)';
+    return (p.cabang||'-')+' (jenis tidak dicatat)';
+  }
+  function kardusTxt(p){
+    const list = p.bahanList && p.bahanList.length>0 ? p.bahanList : (p.kardusItemId ? [{itemId:p.kardusItemId, qty:p.qtyKardus}] : []);
+    return list.map(b=>{ const it=itemById(b.itemId); return (it?it.nama:'(barang dihapus)')+': '+(b.qty||0).toLocaleString('id-ID'); }).join(', ') || '-';
+  }
+
+  function tampil(){
+    if(!tanggal) tanggal = today();
+    const cvs = daftarCv();
+    const cvOpts = ['<option value="">-- pilih CV --</option>'].concat(cvs.map(s=>`<option ${s===cv?'selected':''}>${s}</option>`)).join('');
+    const varian = varianUntukCv(cv);
+    const head1 = CABANG_P.map(c=>`<th colspan="2" style="text-align:center;">${c}</th>`).join('');
+    const head2 = DEST.map(d=>`<th style="text-align:center;">${d.jenis}</th>`).join('');
+    const rowsV = varian.map(nama=>{
+      const s = stokVarianGudang(nama);
+      const cells = DEST.map(d=>`<td><input type="number" min="0" class="pk2-q" data-nama="${esc(nama)}" data-k="${d.key}" value="${(pcs[nama]&&pcs[nama][d.key])||''}" placeholder="0" style="width:58px;"></td>`).join('');
+      return `<tr><td>${nama}</td><td class="${s.sisa<0?'sisa-low':'sisa-ok'}">${s.sisa.toLocaleString('id-ID')}</td>${cells}<td><b class="pk2-rowtotal" data-nama="${esc(nama)}">0</b></td></tr>`;
+    }).join('');
+    const kCells = DEST.map(d=>`<td><input type="number" min="0" step="any" class="pk2-k" data-k="${d.key}" value="${krd[d.key]||''}" placeholder="0" style="width:58px;"></td>`).join('');
+
+    const riwayat = packing.slice().sort((a,b)=>b.tanggal.localeCompare(a.tanggal)).map((p,idx)=>{
+      const tot = (p.varian||[]).reduce((s,v)=>s+v.jumlah,0);
+      const log = riwayatEditUntuk('packing', p.id);
+      const logRow = log.length>0 ? `<tr><td colspan="8"><div class="note"><b>Riwayat edit:</b><ul style="margin:4px 0 0 16px;padding:0;">${log.map(r=>`<li>${new Date(r.waktu).toLocaleString('id-ID')} — ${r.perubahan.join('; ')}</li>`).join('')}</ul></div></td></tr>` : '';
+      if(editId===p.id && draft){
+        const cvEdit = ['<option value="">-- CV --</option>'].concat(daftarCv().map(s=>`<option ${s===draft.cv?'selected':''}>${s}</option>`)).join('');
+        const cabEdit = CABANG_P.map(c=>`<option ${c===draft.cabang?'selected':''}>${c}</option>`).join('');
+        const jenEdit = JENIS_P.map(j=>`<option ${j===draft.jenis?'selected':''}>${j}</option>`).join('');
+        const nama = Array.from(new Set(semuaVarianNama().concat(Object.keys(draft.pcs))));
+        const rotiEdit = `<div style="display:flex;flex-wrap:wrap;gap:6px;">${nama.map(n=>`<label style="font-size:11.5px;">${n}<br><input type="number" min="0" class="pk2-e-pcs" data-nama="${esc(n)}" value="${draft.pcs[n]||''}" style="width:70px;"></label>`).join('')}</div>`;
+        const kEdit = draft.kEditable
+          ? `<select id="pk2-e-kitem"><option value="">-- kardus --</option>${optsItem(draft.kItem)}</select> <input type="number" min="0" step="any" id="pk2-e-kqty" value="${draft.kQty}" style="width:70px;">`
+          : `<span class="note">${kardusTxt(p)}<br>Kardus tidak bisa diubah di sini. Hapus lalu catat ulang.</span>`;
+        return `<tr><td>${idx+1}</td>
+          <td><input type="date" id="pk2-e-tgl" value="${draft.tanggal}" style="width:130px;"></td>
+          <td><select id="pk2-e-cv">${cvEdit}</select></td>
+          <td><select id="pk2-e-cab">${cabEdit}</select> <select id="pk2-e-jen">${jenEdit}</select></td>
+          <td>${rotiEdit}</td><td>${kEdit}</td>
+          <td><input type="text" id="pk2-e-ket" value="${esc(draft.ket)}" style="width:100px;"></td>
+          <td><button class="primary" id="pk2-e-simpan" style="padding:5px 10px;">Simpan</button> <button class="danger" id="pk2-e-batal">Batal</button></td></tr>${logRow}`;
+      }
+      return `<tr><td>${idx+1}</td><td>${p.tanggal}</td><td>${p.cv||'-'}</td><td>${tujuanTxt(p)}</td>
+        <td>${tot>0 ? tot.toLocaleString('id-ID')+' pcs<div class="note" style="margin:2px 0 0 0;">'+rinci(p.varian)+'</div>' : '-'}</td>
+        <td>${kardusTxt(p)}</td><td>${p.ket||'-'}</td>
+        <td><button class="danger" style="color:var(--blue)" data-pk2-edit="${p.id}">Edit</button> <button class="danger" data-pk2-del="${p.id}">Hapus</button></td></tr>${logRow}`;
+    }).join('');
+
+    return `
+    <form id="form-packing" style="display:none;"></form>
+    <div class="card">
+      <h2>Packing per CV</h2>
+      <div class="sub">Pilih CV (sesuai CV di Barang Masuk), isi pcs roti di kolom tujuan: Stock Toko atau Pesanan untuk tiap cabang. Isi jumlah kardus di baris bawah. Sekali Simpan, roti tercatat sudah dikemas dan stok kardus berkurang.</div>
+      <div class="inline" style="margin-bottom:10px;">
+        <div class="field"><label>Tanggal</label><input type="date" id="pk2-tanggal" value="${tanggal}"></div>
+        <div class="field"><label>CV</label><select id="pk2-cv" style="min-width:160px;">${cvOpts}</select></div>
+        <div class="field"><label>Jenis Kardus</label><select id="pk2-item" style="min-width:220px;"><option value="">-- pilih kardus --</option>${optsItem(itemId)}</select></div>
+        <div class="field"><label>Keterangan</label><input type="text" id="pk2-ket" value="${esc(ket)}" placeholder="opsional"></div>
+        <label style="font-size:12px;"><input type="checkbox" id="pk2-semua" ${semuaRoti?'checked':''}> Tampilkan semua roti</label>
+      </div>
+      <div style="overflow-x:auto;">
+      <table><thead><tr><th rowspan="2">Nama Roti</th><th rowspan="2">Belum Dikemas</th>${head1}<th rowspan="2">Total</th></tr><tr>${head2}</tr></thead>
+      <tbody>${rowsV || `<tr><td colspan="${DEST.length+3}" class="empty">${cv?'Tidak ada roti dari premix CV ini. Centang "Tampilkan semua roti" kalau perlu.':'Pilih CV dulu.'}</td></tr>`}
+      <tr style="background:var(--cream);"><td><b>Jumlah Kardus</b></td><td></td>${kCells}<td><b id="pk2-ktotal">0</b></td></tr></tbody></table>
+      </div>
+      <div style="margin-top:10px;"><button type="button" class="primary" id="pk2-simpan">Simpan Packing</button></div>
+    </div>
+    <div class="card">
+      <h2>Riwayat Packing (${packing.length})</h2>
+      <div style="overflow-x:auto;">
+      <table><thead><tr><th>No</th><th>Tanggal</th><th>CV</th><th>Tujuan</th><th>Roti Dikemas</th><th>Kardus</th><th>Ket</th><th></th></tr></thead>
+      <tbody>${riwayat || '<tr><td colspan="8" class="empty">Belum ada packing</td></tr>'}</tbody></table>
+      </div>
+    </div>`;
+  }
+
+  function hitung(){
+    const rt = {};
+    document.querySelectorAll('.pk2-q').forEach(i=>{ rt[i.dataset.nama]=(rt[i.dataset.nama]||0)+(parseFloat(i.value)||0); });
+    document.querySelectorAll('.pk2-rowtotal').forEach(b=>{ b.textContent=(rt[b.dataset.nama]||0).toLocaleString('id-ID'); });
+    let k=0; document.querySelectorAll('.pk2-k').forEach(i=>{ k+=parseFloat(i.value)||0; });
+    const kt = el('pk2-ktotal'); if(kt) kt.textContent = k.toLocaleString('id-ID');
+  }
+
+  async function simpan(){
+    const tgl = el('pk2-tanggal').value || today();
+    const catatan = el('pk2-ket').value.trim();
+    if(!cv){ alert('Pilih CV dulu.'); return; }
+    const per = {}; DEST.forEach(d=>per[d.key]={varian:[], kardus:0});
+    const totalVarian = {};
+    document.querySelectorAll('.pk2-q').forEach(i=>{
+      const n = parseFloat(i.value)||0;
+      if(n>0){ per[i.dataset.k].varian.push({nama:i.dataset.nama, jumlah:n}); totalVarian[i.dataset.nama]=(totalVarian[i.dataset.nama]||0)+n; }
+    });
+    let totalK = 0;
+    document.querySelectorAll('.pk2-k').forEach(i=>{ const n=parseFloat(i.value)||0; per[i.dataset.k].kardus=n; totalK+=n; });
+    const aktif = DEST.filter(d=>per[d.key].varian.length>0 || per[d.key].kardus>0);
+    if(aktif.length===0){ alert('Belum ada yang diisi.'); return; }
+    if(totalK>0 && !itemId){ alert('Pilih jenis kardus dulu.'); return; }
+    const tanpaK = aktif.filter(d=>per[d.key].varian.length>0 && per[d.key].kardus<=0).map(d=>d.label);
+    if(tanpaK.length>0 && !confirm('Roti sudah diisi tapi kardus kosong untuk: '+tanpaK.join(', ')+'. Tetap simpan?')) return;
+    const lebih = Object.keys(totalVarian).filter(n=>totalVarian[n] > stokVarianGudang(n).sisa);
+    if(lebih.length>0 && !confirm('Jumlah packing melebihi sisa belum dikemas untuk: '+lebih.join(', ')+'. Tetap simpan?')) return;
+    if(totalK>0 && stokItem(itemId).sisa < totalK && !confirm('Jumlah kardus melebihi stok kardus. Tetap simpan?')) return;
+
+    const btn = el('pk2-simpan'); btn.disabled=true; btn.textContent='Menyimpan...';
+    try{
+      for(const d of aktif){
+        const rec = {id:uid(), tanggal:tgl, cv, cabang:d.cabang, jenisTujuan:d.jenis, varian:per[d.key].varian, bahanList:[], ket:catatan};
+        if(per[d.key].kardus>0){
+          const tr = await tambahTrx({tanggal:tgl, itemId, tipe:'keluar', qty:per[d.key].kardus, ket:'Packing '+cv+' ke '+d.label});
+          rec.bahanList.push({itemId, qty:per[d.key].kardus, trxId:tr.id});
+        }
+        packing.push(rec);
+      }
+      await save('packing', packing);
+      resetForm();
+    }catch(e){ console.error(e); alert('Gagal menyimpan packing. Cek koneksi, lalu cek Riwayat sebelum mengulang.'); }
+    renderAll();
+  }
+
+  async function hapus(id){
+    const p = packing.find(x=>x.id===id); if(!p) return;
+    const link = p.bahanList && p.bahanList.length>0;
+    if(!confirm('Hapus packing '+tujuanTxt(p)+' tanggal '+p.tanggal+'? Roti kembali jadi belum dikemas.'+(link?' Stok kardus juga dikembalikan.':' (Data lama: stok kardus tidak otomatis kembali.)'))) return;
+    if(link){
+      const ids = p.bahanList.map(b=>b.trxId).filter(Boolean);
+      if(ids.length>0){ trx = trx.filter(t=>!ids.includes(t.id)); await save('trx', trx); }
+    }
+    packing = packing.filter(x=>x.id!==id);
+    await save('packing', packing);
+    renderAll();
+  }
+
+  function mulaiEdit(id){
+    const p = packing.find(x=>x.id===id); if(!p) return;
+    editId = id;
+    const bl = p.bahanList||[];
+    const legacy = !!p.kardusItemId && bl.length===0;
+    const kEditable = !legacy && bl.length<=1;
+    const pm = {}; (p.varian||[]).forEach(v=>{ pm[v.nama]=v.jumlah; });
+    draft = { tanggal:p.tanggal, cv:p.cv||'', cabang:CABANG_P.includes(p.cabang)?p.cabang:'Tuban', jenis:p.jenisTujuan||'Pesanan', ket:p.ket||'', pcs:pm, kEditable, kItem:bl[0]?bl[0].itemId:'', kQty:bl[0]?bl[0].qty:'' };
+    renderAll();
+  }
+
+  async function simpanEdit(){
+    const p = packing.find(x=>x.id===editId); if(!p || !draft) return;
+    const d = draft;
+    if(!d.tanggal){ alert('Tanggal belum diisi.'); return; }
+    if(!d.cv){ alert('Pilih CV.'); return; }
+    const baru = Object.keys(d.pcs).map(n=>({nama:n, jumlah:parseFloat(d.pcs[n])||0})).filter(x=>x.jumlah>0);
+    let kQty = 0;
+    if(d.kEditable){ kQty = parseFloat(d.kQty)||0; if(kQty>0 && !d.kItem){ alert('Pilih jenis kardus.'); return; } }
+    if(baru.length===0 && kQty<=0 && d.kEditable){ alert('Roti dan kardus kosong. Untuk membatalkan packing, pakai Hapus.'); return; }
+    const lama = {}; (p.varian||[]).forEach(v=>{ lama[v.nama]=(lama[v.nama]||0)+v.jumlah; });
+    const lebih = baru.filter(v=>{ const dl=v.jumlah-(lama[v.nama]||0); return dl>0 && stokVarianGudang(v.nama).sisa < dl; }).map(v=>v.nama);
+    if(lebih.length>0 && !confirm('Jumlah melebihi sisa belum dikemas untuk: '+lebih.join(', ')+'. Tetap simpan?')) return;
+
+    const sebelum = { tanggal:p.tanggal, cv:p.cv||'-', tujuan:tujuanTxt(p), ket:p.ket||'', roti:rinci(p.varian)||'-', kardus:kardusTxt(p) };
+    const itB = d.kItem ? itemById(d.kItem) : null;
+    const sesudah = { tanggal:d.tanggal, cv:d.cv, tujuan:d.jenis+' '+d.cabang, ket:d.ket, roti:rinci(baru)||'-', kardus: d.kEditable ? (kQty>0 ? ((itB?itB.nama:'?')+': '+kQty) : '-') : kardusTxt(p) };
+    const b = el('pk2-e-simpan'); if(b){ b.disabled=true; b.textContent='Menyimpan...'; }
+    try{
+      if(d.kEditable){
+        const b0 = (p.bahanList||[])[0];
+        const ketTrx = 'Packing '+d.cv+' ke '+d.jenis+' '+d.cabang;
+        if(kQty>0){
+          let t = (b0 && b0.trxId) ? trx.find(x=>x.id===b0.trxId) : null;
+          if(t){ t.itemId=d.kItem; t.qty=kQty; t.tanggal=d.tanggal; t.ket=ketTrx; }
+          else { t = {id:uid(), tanggal:d.tanggal, itemId:d.kItem, tipe:'keluar', qty:kQty, ket:ketTrx}; trx.push(t); }
+          p.bahanList = [{itemId:d.kItem, qty:kQty, trxId:t.id}];
+        } else {
+          if(b0 && b0.trxId) trx = trx.filter(x=>x.id!==b0.trxId);
+          p.bahanList = [];
+        }
+        await save('trx', trx);
+      }
+      p.varian=baru; p.tanggal=d.tanggal; p.cv=d.cv; p.cabang=d.cabang; p.jenisTujuan=d.jenis; p.ket=d.ket;
+      await save('packing', packing);
+      await catatEdit('packing', p.id, 'Packing '+d.cv+' ke '+d.jenis+' '+d.cabang+' '+d.tanggal, sebelum, sesudah);
+      editId=null; draft=null;
+    }catch(e){ console.error(e); alert('Gagal menyimpan perubahan. Cek koneksi, lalu cek data.'); }
+    renderAll();
+  }
+
+  function pasang(){
+    const main = el('main');
+    main.querySelectorAll('.pk2-q').forEach(i=>i.addEventListener('input',()=>{ (pcs[i.dataset.nama]=pcs[i.dataset.nama]||{})[i.dataset.k]=i.value; hitung(); }));
+    main.querySelectorAll('.pk2-k').forEach(i=>i.addEventListener('input',()=>{ krd[i.dataset.k]=i.value; hitung(); }));
+    const c = el('pk2-cv'); if(c) c.addEventListener('change',()=>{ cv=c.value; pcs={}; renderAll(); });
+    const sa = el('pk2-semua'); if(sa) sa.addEventListener('change',()=>{ semuaRoti=sa.checked; renderAll(); });
+    const it = el('pk2-item'); if(it) it.addEventListener('change',()=>{ itemId=it.value; });
+    const tg = el('pk2-tanggal'); if(tg) tg.addEventListener('change',()=>{ tanggal=tg.value; });
+    const kt = el('pk2-ket'); if(kt) kt.addEventListener('input',()=>{ ket=kt.value; });
+    const sm = el('pk2-simpan'); if(sm) sm.addEventListener('click', simpan);
+    main.querySelectorAll('[data-pk2-del]').forEach(b=>b.addEventListener('click',()=>hapus(b.dataset.pk2Del)));
+    main.querySelectorAll('[data-pk2-edit]').forEach(b=>b.addEventListener('click',()=>mulaiEdit(b.dataset.pk2Edit)));
+    if(draft){
+      const bind=(id,ev,fn)=>{ const x=el(id); if(x) x.addEventListener(ev,()=>fn(x)); };
+      bind('pk2-e-tgl','change',x=>draft.tanggal=x.value);
+      bind('pk2-e-cv','change',x=>draft.cv=x.value);
+      bind('pk2-e-cab','change',x=>draft.cabang=x.value);
+      bind('pk2-e-jen','change',x=>draft.jenis=x.value);
+      bind('pk2-e-ket','input',x=>draft.ket=x.value);
+      bind('pk2-e-kitem','change',x=>draft.kItem=x.value);
+      bind('pk2-e-kqty','input',x=>draft.kQty=x.value);
+      main.querySelectorAll('.pk2-e-pcs').forEach(i=>i.addEventListener('input',()=>{ draft.pcs[i.dataset.nama]=i.value; }));
+      const es = el('pk2-e-simpan'); if(es) es.addEventListener('click', simpanEdit);
+      const eb = el('pk2-e-batal'); if(eb) eb.addEventListener('click',()=>{ editId=null; draft=null; renderAll(); });
+    }
+    hitung();
+  }
+
+  window.viewPacking = tampil;
+  const _ah = window.attachHandlers;
+  window.attachHandlers = function(){
+    try{ _ah(); }catch(e){ console.warn('attachHandlers sebelumnya:', e); }
+    if(activeTab==='packing') pasang();
+  };
+})();
+</script>
+<script>
+// ===== EXPORT EXCEL UNTUK AUDIT (tampilan polos, ada rumus, siap cetak) =====
+// Tombol "Export Excel" -> laporan audit. Tombol "Cadangan Data" -> data mentah untuk Import.
+(function(){
+  const NAMA_PERUSAHAAN = 'PAPA COOKIES TUBAN';   // ganti kalau perlu
+  const exportCadanganAsli = window.__exportAsliGudang || window.exportExcel;
+  window.__exportAsliGudang = exportCadanganAsli;
+
+  const TUJUAN = [];
+  ['Tuban','Merakurak','Jatirogo','Palang'].forEach(c=>['Stock Toko','Pesanan'].forEach(j=>TUJUAN.push(j+' '+c)));
+
+  const namaB = id => { const it=itemById(id); return it?it.nama:'(barang sudah dihapus)'; };
+  const kodeB = id => { const it=itemById(id); return it?it.kode:'-'; };
+  const katL = k => (KATEGORI[k]&&KATEGORI[k].label)||k||'-';
+  const urut = (a,b)=>String(a.tanggal).localeCompare(String(b.tanggal));
+  function tgl(s){ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return new Date(Date.UTC(+p[0],+p[1]-1,+p[2])); }
+  function cvPremix(itemId){
+    const l = trx.filter(t=>t.tipe==='masuk'&&t.itemId===itemId&&t.supplier).sort((a,b)=>String(b.tanggal).localeCompare(String(a.tanggal)));
+    return l.length?l[0].supplier:'';
+  }
+  function petaCvRoti(){
+    const m={}; produksi.slice().sort(urut).forEach(p=>{ const cv=cvPremix(p.premixItemId); (p.varianHasil||[]).forEach(v=>{ if(cv) m[v.nama]=cv; }); }); return m;
+  }
+  function tujuanTxt(p){
+    if(p.jenisTujuan) return p.jenisTujuan+' '+(p.cabang||'');
+    if(p.cabang==='Stock Toko') return 'Data lama: Stock Toko (cabang tidak dicatat)';
+    if(p.cabang==='Pesanan') return 'Data lama: Pesanan (cabang tidak dicatat)';
+    return 'Data lama: '+(p.cabang||'-')+' (jenis tidak dicatat)';
+  }
+  function muatExcelJS(){
+    return new Promise((ok,gagal)=>{
+      if(window.ExcelJS) return ok();
+      const s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+      s.onload=ok; s.onerror=()=>gagal(new Error('Gagal memuat ExcelJS, cek internet'));
+      document.head.appendChild(s);
+    });
+  }
+
+  const GARIS = {style:'thin',color:{argb:'FF808080'}};
+  const BORDER = {top:GARIS,left:GARIS,bottom:GARIS,right:GARIS};
+  const FMT = {int:'#,##0', dec:'#,##0.##', tgl:'dd/mm/yyyy'};
+  const F = (formula,result)=>({formula, result});
+
+  function buatSheet(wb, nama, judul, periodeTxt, kolom, baris, opsi){
+    opsi = opsi||{};
+    const ws = wb.addWorksheet(nama, {views:[{state:'frozen', ySplit:5}]});
+    const n = kolom.length;
+    ws.mergeCells(1,1,1,n); ws.getCell(1,1).value = judul; ws.getCell(1,1).font={bold:true,size:13};
+    ws.mergeCells(2,1,2,n); ws.getCell(2,1).value = NAMA_PERUSAHAAN;
+    ws.mergeCells(3,1,3,n); ws.getCell(3,1).value = periodeTxt;
+    kolom.forEach((k,i)=>{
+      ws.getColumn(i+1).width = k.w;
+      const c = ws.getCell(5,i+1);
+      c.value = k.h; c.font={bold:true}; c.border=BORDER;
+      c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFD9D9D9'}};
+      c.alignment={horizontal:'center',vertical:'middle',wrapText:true};
+    });
+    ws.getRow(5).height = 32;
+    baris.forEach((r,ri)=>{
+      r.forEach((v,ci)=>{
+        const c = ws.getCell(6+ri, ci+1);
+        c.value = v; c.border = BORDER;
+        const k = kolom[ci];
+        if(k.fmt) c.numFmt = FMT[k.fmt];
+        if(k.wrap) c.alignment={wrapText:true,vertical:'top'};
+      });
+    });
+    let akhir = 5+baris.length;
+    if(opsi.total){
+      const rt = akhir+1;
+      for(let ci=1; ci<=n; ci++){ const c=ws.getCell(rt,ci); c.border=BORDER; c.font={bold:true}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF2F2F2'}}; if(kolom[ci-1].fmt) c.numFmt=FMT[kolom[ci-1].fmt]; }
+      ws.getCell(rt,1).value = 'TOTAL';
+      opsi.total.forEach(ci=>{
+        const huruf = ws.getColumn(ci).letter;
+        const hasil = baris.reduce((s,r)=>{ const v=r[ci-1]; const x=(v&&typeof v==='object'&&'result' in v)?v.result:v; return s+(parseFloat(x)||0); },0);
+        ws.getCell(rt,ci).value = F(`SUM(${huruf}6:${huruf}${Math.max(akhir,6)})`, hasil);
+      });
+      ws._totalRow = rt;
+    }
+    ws.pageSetup = {orientation:'landscape', paperSize:9, fitToPage:true, fitToWidth:1, fitToHeight:0, printTitlesRow:'5:5',
+      margins:{left:0.4,right:0.4,top:0.5,bottom:0.6,header:0.3,footer:0.3}};
+    ws.headerFooter = {oddFooter:'&LDicetak: &D&CHalaman &P dari &N&R'+NAMA_PERUSAHAAN};
+    ws._akhirData = Math.max(akhir,6);
+    return ws;
+  }
+
+  async function exportAudit(){
+    const d = new Date(); const awalBulan = new Date(d.getFullYear(), d.getMonth(), 1);
+    const iso = x=> new Date(x.getTime()-x.getTimezoneOffset()*60000).toISOString().slice(0,10);
+    const dari = prompt('Laporan dari tanggal (format TAHUN-BULAN-TANGGAL, contoh 2026-10-31):', iso(awalBulan));
+    if(!dari) return;
+    const sampai = prompt('Sampai tanggal:', today());
+    if(!sampai) return;
+    if(dari>sampai){ alert('Tanggal awal tidak boleh lebih besar dari tanggal akhir.'); return; }
+    await muatExcelJS();
+
+    const inP = t => t>=dari && t<=sampai;
+    const periodeTxt = `Periode: ${dari.split('-').reverse().join('/')} s/d ${sampai.split('-').reverse().join('/')}`;
+    const wb = new ExcelJS.Workbook();
+    wb.calcProperties = {fullCalcOnLoad:true};
+    const ws = wb.addWorksheet('Ringkasan');   // sheet pertama, diisi di bagian akhir
+
+    // ----- data periode -----
+    const masuk  = trx.filter(t=>t.tipe==='masuk'  && inP(t.tanggal)).sort(urut);
+    const keluar = trx.filter(t=>t.tipe==='keluar' && inP(t.tanggal)).sort(urut);
+
+    // ----- Hutang (ringkas): per CV dan per bulan, diambil dari sheet Barang Masuk -----
+    const nM = Math.max(5+masuk.length,6);
+    const totalOf = t => { const it=itemById(t.itemId); return it ? (it.harga||0)*(t.qty||0) : 0; };
+    const dibayarOf = t => t.statusBayar==='hutang' ? Math.min(totalOf(t), parseFloat(t.dibayar)||0) : totalOf(t);
+    const cvH = Array.from(new Set(masuk.map(t=>t.supplier||'-'))).sort();
+    const rHut = cvH.map((cv,i)=>{ const r=6+i;
+      const ds = masuk.filter(t=>(t.supplier||'-')===cv);
+      const tot = ds.reduce((a,t)=>a+totalOf(t),0), by = ds.reduce((a,t)=>a+dibayarOf(t),0);
+      return [cv, F(`SUMIFS('Barang Masuk'!$J$6:$J$${nM},'Barang Masuk'!$F$6:$F$${nM},$A${r})`, tot),
+                  F(`SUMIFS('Barang Masuk'!$L$6:$L$${nM},'Barang Masuk'!$F$6:$F$${nM},$A${r})`, by),
+                  F(`B${r}-C${r}`, tot-by)]; });
+    const wsH = buatSheet(wb,'Hutang','RINGKASAN HUTANG PEMBELIAN PER CV',periodeTxt,[
+      {h:'CV / Supplier',w:26},{h:'Total Pembelian (Rp)',w:20,fmt:'int'},{h:'Sudah Dibayar (Rp)',w:20,fmt:'int'},{h:'Sisa Hutang (Rp)',w:20,fmt:'int'}], rHut, {total:[2,3,4]});
+    // tabel kedua: per bulan (bulan dalam periode yang dipilih)
+    let rb = wsH._totalRow + 3;
+    wsH.getCell(rb-1,1).value = 'Per Bulan'; wsH.getCell(rb-1,1).font={bold:true};
+    ['Bulan','Total Pembelian (Rp)','Sudah Dibayar (Rp)','Sisa Hutang (Rp)'].forEach((h,i)=>{
+      const c=wsH.getCell(rb,i+1); c.value=h; c.font={bold:true}; c.border=BORDER; c.alignment={horizontal:'center',vertical:'middle',wrapText:true};
+      c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFD9D9D9'}}; });
+    const bln=[]; { let y=+dari.slice(0,4), m=+dari.slice(5,7); const y2=+sampai.slice(0,4), m2=+sampai.slice(5,7);
+      while((y<y2||(y===y2&&m<=m2)) && bln.length<36){ bln.push([y,m]); m++; if(m>12){m=1;y++;} } }
+    bln.forEach((ym,i)=>{ const r=rb+1+i, key=ym[0]+'-'+String(ym[1]).padStart(2,'0');
+      const ds = masuk.filter(t=>String(t.tanggal).slice(0,7)===key);
+      const tot = ds.reduce((a,t)=>a+totalOf(t),0), by = ds.reduce((a,t)=>a+dibayarOf(t),0);
+      const rg = col => `SUMIFS('Barang Masuk'!$${col}$6:$${col}$${nM},'Barang Masuk'!$B$6:$B$${nM},">="&$A${r},'Barang Masuk'!$B$6:$B$${nM},"<="&EOMONTH($A${r},0))`;
+      const a=wsH.getCell(r,1); a.value=new Date(Date.UTC(ym[0],ym[1]-1,1)); a.numFmt='mmm yyyy'; a.alignment={horizontal:'left'};
+      wsH.getCell(r,2).value=F(rg('J'),tot); wsH.getCell(r,3).value=F(rg('L'),by); wsH.getCell(r,4).value=F(`B${r}-C${r}`,tot-by);
+      for(let c=1;c<=4;c++){ wsH.getCell(r,c).border=BORDER; if(c>1) wsH.getCell(r,c).numFmt=FMT.int; } });
+    wsH.getCell(rb+bln.length+2,1).value='Status Lunas/Hutang dan jumlah dibayar diambil dari menu Masuk (bagian Hutang). Barang yang tidak ditandai Hutang dianggap Lunas.';
+    wsH.getCell(rb+bln.length+2,1).font={italic:true,size:9};
+
+    // ----- Barang Masuk -----
+    const rMasuk = masuk.map((t,i)=>{ const it=itemById(t.itemId), r=6+i, h=it?it.harga||0:0, q=t.qty||0, st=t.statusBayar==='hutang';
+      return [i+1, tgl(t.tanggal), kodeB(t.itemId), namaB(t.itemId), it?katL(it.kategori):'-', t.supplier||'-', q, it?it.satuan:'-', h, F(`G${r}*I${r}`, q*h),
+        st?'Hutang':'Lunas', st?dibayarOf(t):F(`J${r}`, q*h), F(`J${r}-L${r}`, q*h-dibayarOf(t)), t.ket||'']; });
+    const wsM = buatSheet(wb,'Barang Masuk','LAPORAN BARANG MASUK',periodeTxt,[
+      {h:'No',w:5},{h:'Tanggal',w:12,fmt:'tgl'},{h:'Kode',w:10},{h:'Nama Barang',w:32},{h:'Kategori',w:12},{h:'CV / Supplier',w:16},
+      {h:'Jumlah',w:10,fmt:'dec'},{h:'Satuan',w:9},{h:'Harga Satuan (Rp)',w:15,fmt:'int'},{h:'Total (Rp)',w:15,fmt:'int'},
+      {h:'Status',w:9},{h:'Dibayar (Rp)',w:15,fmt:'int'},{h:'Sisa Hutang (Rp)',w:15,fmt:'int'},{h:'Keterangan',w:28}], rMasuk, {total:[10,12,13]});
+
+    // ----- Barang Keluar -----
+    const rKeluar = keluar.map((t,i)=>{ const it=itemById(t.itemId), r=6+i, h=it?it.harga||0:0, q=t.qty||0;
+      return [i+1, tgl(t.tanggal), kodeB(t.itemId), namaB(t.itemId), it?katL(it.kategori):'-', q, it?it.satuan:'-', h, F(`F${r}*H${r}`, q*h), t.ket||'']; });
+    const wsK = buatSheet(wb,'Barang Keluar','LAPORAN BARANG KELUAR',periodeTxt,[
+      {h:'No',w:5},{h:'Tanggal',w:12,fmt:'tgl'},{h:'Kode',w:10},{h:'Nama Barang',w:32},{h:'Kategori',w:12},
+      {h:'Jumlah',w:10,fmt:'dec'},{h:'Satuan',w:9},{h:'Harga Satuan (Rp)',w:15,fmt:'int'},{h:'Nilai (Rp)',w:15,fmt:'int'},{h:'Keterangan',w:34}], rKeluar, {total:[9]});
+
+    // ----- Stok Barang: saldo awal + masuk - keluar = saldo akhir -----
+    const bM = wsM._akhirData, bK = wsK._akhirData;
+    const rStok = items.map((it,i)=>{
+      const r=6+i;
+      const awal = trx.filter(t=>t.itemId===it.id && t.tanggal<dari).reduce((s,t)=>s+(t.tipe==='masuk'?t.qty:-t.qty),0);
+      const m = masuk.filter(t=>t.itemId===it.id).reduce((s,t)=>s+t.qty,0);
+      const k = keluar.filter(t=>t.itemId===it.id).reduce((s,t)=>s+t.qty,0);
+      const akhir = awal+m-k;
+      return [i+1, it.kode, katL(it.kategori), it.nama, it.satuan, it.harga||0, awal,
+        F(`SUMIFS('Barang Masuk'!$G$6:$G$${bM},'Barang Masuk'!$C$6:$C$${bM},$B${r})`, m),
+        F(`SUMIFS('Barang Keluar'!$F$6:$F$${bK},'Barang Keluar'!$C$6:$C$${bK},$B${r})`, k),
+        F(`G${r}+H${r}-I${r}`, akhir), F(`J${r}*F${r}`, akhir*(it.harga||0))];
+    });
+    const wsS = buatSheet(wb,'Stok Barang','LAPORAN STOK BARANG',periodeTxt,[
+      {h:'No',w:5},{h:'Kode',w:10},{h:'Kategori',w:12},{h:'Nama Barang',w:32},{h:'Satuan',w:9},{h:'Harga Satuan (Rp)',w:15,fmt:'int'},
+      {h:'Saldo Awal',w:11,fmt:'dec'},{h:'Masuk',w:11,fmt:'dec'},{h:'Keluar',w:11,fmt:'dec'},{h:'Saldo Akhir',w:11,fmt:'dec'},{h:'Nilai Saldo Akhir (Rp)',w:18,fmt:'int'}], rStok, {total:[11]});
+
+    // ----- Hasil Produksi -----
+    const rProd=[]; let no=0;
+    produksi.filter(p=>inP(p.tanggal)).sort(urut).forEach(p=>{
+      const it=itemById(p.premixItemId), sat=(it&&it.satuanHasil)||'pcs';
+      (p.varianHasil||[]).forEach(v=>{ no++; rProd.push([no, tgl(p.tanggal), namaB(p.premixItemId), cvPremix(p.premixItemId)||'-', v.nama, v.jumlah||0, sat, p.ket||'']); });
+    });
+    buatSheet(wb,'Hasil Produksi','LAPORAN HASIL PRODUKSI',periodeTxt,[
+      {h:'No',w:5},{h:'Tanggal',w:12,fmt:'tgl'},{h:'Premix yang Dipakai',w:28},{h:'CV Premix',w:16},{h:'Nama Roti',w:30},{h:'Jumlah Jadi',w:12,fmt:'dec'},{h:'Satuan',w:9},{h:'Keterangan',w:28}], rProd, {total:[6]});
+
+    // ----- Packing -----
+    const cvRoti = petaCvRoti(); const rPack=[]; no=0;
+    packing.filter(p=>inP(p.tanggal)).sort(urut).forEach(p=>{
+      const krd = (p.bahanList||[]).map(b=>namaB(b.itemId)+': '+(b.qty||0)).join(', ') || '-';
+      const bar = (p.varian||[]).filter(v=>v.jumlah>0);
+      if(bar.length===0){ no++; rPack.push([no, tgl(p.tanggal), p.cv||'-', '-', tujuanTxt(p), 0, krd, p.ket||'']); return; }
+      bar.forEach((v,ix)=>{ no++; rPack.push([no, tgl(p.tanggal), p.cv||cvRoti[v.nama]||'(CV belum diketahui)', v.nama, tujuanTxt(p), v.jumlah, ix===0?krd:'', p.ket||'']); });
+    });
+    const wsP = buatSheet(wb,'Packing','LAPORAN PACKING PER CV',periodeTxt,[
+      {h:'No',w:5},{h:'Tanggal',w:12,fmt:'tgl'},{h:'CV',w:18},{h:'Nama Roti',w:30},{h:'Tujuan',w:34},{h:'Jumlah (pcs)',w:12,fmt:'int'},{h:'Kardus yang Dipakai',w:34},{h:'Keterangan',w:24}], rPack, {total:[6]});
+
+    // ----- Rekap Packing per CV -----
+    const bP = wsP._akhirData;
+    const cvList = Array.from(new Set(rPack.map(r=>r[2]).filter(x=>x&&x!=='-'))).sort();
+    const hur = 'BCDEFGHI';
+    const rRekap = cvList.map((cv,i)=>{
+      const r=6+i;
+      const nilai = TUJUAN.map(tj=>rPack.filter(x=>x[2]===cv&&x[4]===tj).reduce((s,x)=>s+x[5],0));
+      const tot = rPack.filter(x=>x[2]===cv).reduce((s,x)=>s+x[5],0);
+      return [cv].concat(
+        TUJUAN.map((tj,k)=>F(`SUMIFS(Packing!$F$6:$F$${bP},Packing!$C$6:$C$${bP},$A${r},Packing!$E$6:$E$${bP},${hur[k]}$5)`, nilai[k])),
+        [F(`K${r}-SUM(B${r}:I${r})`, tot-nilai.reduce((a,b)=>a+b,0)), F(`SUMIFS(Packing!$F$6:$F$${bP},Packing!$C$6:$C$${bP},$A${r})`, tot)]);
+    });
+    const wsR = buatSheet(wb,'Rekap Packing per CV','REKAP PACKING PER CV (pcs)',periodeTxt,
+      [{h:'CV',w:22}].concat(TUJUAN.map(t=>({h:t,w:15,fmt:'int'})), [{h:'Data Lama (tujuan tidak lengkap)',w:20,fmt:'int'},{h:'Total (pcs)',w:13,fmt:'int'}]),
+      rRekap, {total:[2,3,4,5,6,7,8,9,10,11]});
+
+    // ----- Ringkasan (sheet pertama) + tanda tangan -----
+    ws.getColumn(1).width=46; ws.getColumn(2).width=22; ws.getColumn(3).width=22; ws.getColumn(4).width=22;
+    ws.mergeCells('A1:D1'); ws.getCell('A1').value='RINGKASAN LAPORAN GUDANG ROTI'; ws.getCell('A1').font={bold:true,size:13};
+    ws.mergeCells('A2:D2'); ws.getCell('A2').value=NAMA_PERUSAHAAN;
+    ws.mergeCells('A3:D3'); ws.getCell('A3').value=periodeTxt;
+    const sum = (rows,idx)=>rows.reduce((s,r)=>{ const v=r[idx]; return s+(parseFloat(v&&typeof v==='object'?v.result:v)||0); },0);
+    const baris = [
+      ['Total nilai barang masuk (Rp)',  F(`'Barang Masuk'!J${wsM._totalRow}`, sum(rMasuk,9)), 'int'],
+      ['Total sisa hutang ke CV (Rp)', F(`'Barang Masuk'!M${wsM._totalRow}`, sum(rMasuk,12)), 'int'],
+      ['Total nilai barang keluar (Rp)', F(`'Barang Keluar'!I${wsK._totalRow}`, sum(rKeluar,8)), 'int'],
+      ['Total nilai saldo akhir stok (Rp)', F(`'Stok Barang'!K${wsS._totalRow}`, sum(rStok,10)), 'int'],
+      ['Total roti dipacking (pcs)',      F(`Packing!F${wsP._totalRow}`, sum(rPack,5)), 'int'],
+      ['Jumlah transaksi barang masuk',   masuk.length, 'int'],
+      ['Jumlah transaksi barang keluar',  keluar.length, 'int']
+    ];
+    baris.forEach((b,i)=>{ const r=5+i;
+      ws.getCell(r,1).value=b[0]; ws.getCell(r,2).value=b[1]; ws.getCell(r,2).numFmt=FMT[b[2]];
+      ws.getCell(r,1).border=BORDER; ws.getCell(r,2).border=BORDER; });
+    const rs = 5+baris.length+3;
+    ws.getCell(rs,1).value='Dibuat oleh,'; ws.getCell(rs,2).value='Diperiksa,'; ws.getCell(rs,3).value='Mengetahui,';
+    ws.getCell(rs+1,1).value='Admin Gudang'; ws.getCell(rs+1,2).value='Internal Control'; ws.getCell(rs+1,3).value='Direktur';
+    ws.getCell(rs+5,1).value='(...............................)'; ws.getCell(rs+5,2).value='(...............................)'; ws.getCell(rs+5,3).value='(...............................)';
+    ws.getCell(rs+7,1).value='Catatan: Saldo Akhir = Saldo Awal + Masuk - Keluar. Kolom bernilai rumus akan terhitung otomatis jika data diubah.';
+    ws.getCell(rs+7,1).font={italic:true,size:9};
+    ws.pageSetup={orientation:'portrait',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0};
+
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a = document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download = `Laporan-Gudang-Roti-${dari}-sd-${sampai}.xlsx`; document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1000);
+  }
+
+  function pasangTombol(){
+    const btn = document.getElementById('btn-export-excel');
+    if(!btn || btn.dataset.audit) return;
+    btn.dataset.audit='1';
+    btn.title='Laporan Excel untuk audit (pilih periode)';
+    btn.onclick = async function(ev){
+      ev.stopImmediatePropagation();
+      try{ await exportAudit(); }catch(e){ console.error(e); alert('Gagal membuat Excel: '+e.message); }
+    };
+    if(!document.getElementById('btn-cadangan-data') && typeof exportCadanganAsli==='function'){
+      const b2=document.createElement('button'); b2.id='btn-cadangan-data'; b2.type='button';
+      b2.title='Simpan semua data mentah (untuk Import Excel)'; b2.textContent='💾 Cadangan Data';
+      b2.onclick=function(){ exportCadanganAsli(); };
+      btn.insertAdjacentElement('afterend', b2);
+    }
+  }
+  pasangTombol(); setTimeout(pasangTombol, 800);
+})();
+</script>
