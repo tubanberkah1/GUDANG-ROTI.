@@ -6265,3 +6265,319 @@ loadAll().then(function () { updateDbStatusBadge(); renderAll(); });
   }
 })();
 </script>
+<script>
+// =====================================================================
+// LAPORAN AUDIT LENGKAP PER CV (menggantikan tampilan tab "Laporan Audit")
+// Isi: Masuk, Keluar, Produksi, Packing, Stok, Opname - semua kategori
+// (Premix, Bahan Baku, Kardus, Non Bahan) per CV. Hanya MEMBACA data.
+// =====================================================================
+(function(){
+  var NO_CV = '(Tanpa CV)';
+  var A = { dari:'', sampai:'', cv:'', kat:'' };
+  var hasilSection = [];
+
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function num(n){ return (Number(n)||0).toLocaleString('id-ID',{maximumFractionDigits:2}); }
+  function pad2(n){ return String(n).padStart(2,'0'); }
+  function katLabel(k){ return (KATEGORI[k] && KATEGORI[k].label) || k || '-'; }
+  function semuaKat(){ return Object.keys(KATEGORI); }
+
+  // CV terakhir yang tercatat di Masuk untuk tiap barang
+  function petaCvItem(){
+    var m = {};
+    trx.filter(function(t){ return t.tipe==='masuk' && t.supplier; })
+       .sort(function(a,b){ return String(a.tanggal).localeCompare(String(b.tanggal)); })
+       .forEach(function(t){ m[t.itemId] = t.supplier; });
+    return m;
+  }
+
+  function jenisKeluar(ket){
+    ket = ket || '';
+    if(ket.indexOf('Produksi')===0) return 'Produksi';
+    if(ket.indexOf('Packing')===0) return 'Packing';
+    if(ket.indexOf('Retur')===0) return 'Retur';
+    if(ket.indexOf('Penyesuaian Opname')===0) return 'Opname';
+    return 'Manual';
+  }
+
+  function hitung(){
+    var cvItem = petaCvItem();
+    var inR = function(t){ return (!A.dari||t>=A.dari) && (!A.sampai||t<=A.sampai); };
+    var lolosCv = function(cv){ return !A.cv || cv===A.cv; };
+    var lolosKat = function(k){ return !A.kat || k===A.kat; };
+    var kats = semuaKat();
+    var S = [];
+
+    // ---------- 1. MASUK: matriks CV x Kategori ----------
+    var masuk = [];
+    trx.forEach(function(t){
+      if(t.tipe!=='masuk' || !inR(t.tanggal)) return;
+      var it = itemById(t.itemId); if(!it) return;
+      var cv = t.supplier || cvItem[t.itemId] || NO_CV;
+      if(!lolosCv(cv) || !lolosKat(it.kategori)) return;
+      var nilai = (it.harga||0)*(t.qty||0);
+      var bayar = t.statusBayar==='hutang' ? Math.min(nilai, parseFloat(t.dibayar)||0) : nilai;
+      masuk.push({t:t, it:it, cv:cv, nilai:nilai, sisaHutang:nilai-bayar});
+    });
+    var cvSet = {}; masuk.forEach(function(m){ cvSet[m.cv]=1; });
+    var cvMasuk = Object.keys(cvSet).sort();
+    var rowsMat = cvMasuk.map(function(cv){
+      var row = [cv], tot = 0, hut = 0;
+      kats.forEach(function(k){
+        var v = masuk.filter(function(m){ return m.cv===cv && m.it.kategori===k; }).reduce(function(s,m){ return s+m.nilai; },0);
+        row.push(v); tot += v;
+      });
+      hut = masuk.filter(function(m){ return m.cv===cv; }).reduce(function(s,m){ return s+m.sisaHutang; },0);
+      row.push(tot); row.push(hut);
+      return row;
+    });
+    var nK = kats.length;
+    var totCols = []; for(var i=1;i<=nK+2;i++) totCols.push(i);
+    S.push({ judul:'1. Pembelian Masuk per CV x Kategori (Rp)', sub:'Nilai = jumlah x harga di tab Kode. Sisa hutang diambil dari status Lunas/Hutang di tab Masuk.',
+      head:['CV'].concat(kats.map(katLabel), ['Total Masuk','Sisa Hutang']),
+      types:['t'].concat(kats.map(function(){return 'r';}), ['r','r']), rows:rowsMat, total:totCols });
+
+    // ---------- 2. MASUK: rincian per barang ----------
+    var gM = {};
+    masuk.forEach(function(m){
+      var k = m.cv+'|'+m.it.id;
+      var g = gM[k] || (gM[k] = {cv:m.cv, it:m.it, n:0, qty:0, nilai:0});
+      g.n++; g.qty += m.t.qty||0; g.nilai += m.nilai;
+    });
+    var rowsMasukDet = Object.keys(gM).map(function(k){ return gM[k]; })
+      .sort(function(a,b){ return a.cv.localeCompare(b.cv) || a.it.kategori.localeCompare(b.it.kategori) || a.it.nama.localeCompare(b.it.nama); })
+      .map(function(g){ return [g.cv, katLabel(g.it.kategori), g.it.kode, g.it.nama, g.n, g.qty, g.it.satuan, g.it.harga||0, g.nilai]; });
+    S.push({ judul:'2. Rincian Barang Masuk per CV', sub:'Dikelompokkan per CV, kategori, dan barang.',
+      head:['CV','Kategori','Kode','Barang','Jml Transaksi','Total Qty','Satuan','Harga','Nilai'],
+      types:['t','t','t','t','n','n','t','r','r'], rows:rowsMasukDet, total:[4,8] });
+
+    // ---------- 3. KELUAR: per CV, kategori, barang, jenis pemakaian ----------
+    var gK = {};
+    trx.forEach(function(t){
+      if(t.tipe!=='keluar' || !inR(t.tanggal)) return;
+      var it = itemById(t.itemId); if(!it) return;
+      var cv = t.supplier || cvItem[t.itemId] || NO_CV;
+      if(!lolosCv(cv) || !lolosKat(it.kategori)) return;
+      var j = jenisKeluar(t.ket);
+      var k = cv+'|'+it.id+'|'+j;
+      var g = gK[k] || (gK[k] = {cv:cv, it:it, j:j, qty:0, nilai:0});
+      g.qty += t.qty||0; g.nilai += (it.harga||0)*(t.qty||0);
+    });
+    var rowsKeluar = Object.keys(gK).map(function(k){ return gK[k]; })
+      .sort(function(a,b){ return a.cv.localeCompare(b.cv) || a.it.kategori.localeCompare(b.it.kategori) || a.it.nama.localeCompare(b.it.nama) || a.j.localeCompare(b.j); })
+      .map(function(g){ return [g.cv, katLabel(g.it.kategori), g.it.kode, g.it.nama, g.j, g.qty, g.it.satuan, g.nilai]; });
+    S.push({ judul:'3. Barang Keluar per CV, Kategori & Jenis Pemakaian', sub:'Transaksi keluar tidak selalu punya CV; CV diambil dari CV terakhir barang itu di tab Masuk. Jenis: Produksi, Packing, Retur, Opname, Manual.',
+      head:['CV','Kategori','Kode','Barang','Jenis Pemakaian','Qty Keluar','Satuan','Nilai'],
+      types:['t','t','t','t','t','n','t','r'], rows:rowsKeluar, total:[7] });
+
+    // ---------- 4. PRODUKSI: rincian per catatan ----------
+    var prodRows = [];
+    var prodCv = {};
+    if(!A.kat || A.kat==='premix'){
+      produksi.filter(function(p){ return inR(p.tanggal); }).slice().sort(function(a,b){ return String(a.tanggal).localeCompare(String(b.tanggal)); })
+      .forEach(function(p){
+        var it = itemById(p.premixItemId);
+        var cv = cvItem[p.premixItemId] || NO_CV;
+        if(!lolosCv(cv)) return;
+        var sat = it ? it.satuan : '';
+        var satH = it ? satuanHasilItem(it) : 'pcs';
+        var keluar = p.premixDiambil!=null ? p.premixDiambil : (p.resepDiambilManual!=null ? p.resepDiambilManual : (p.qtyPremix||0));
+        var varTxt = (p.varianHasil||[]).map(function(v){ return v.nama+': '+num(v.jumlah); }).join(', ');
+        var hasil = p.totalHasil||0;
+        var std = p.standarJadi;
+        var sel = std!=null ? hasil-std : '';
+        var ef = (std>0) ? hasil/std*100 : '';
+        prodRows.push([p.tanggal, cv, it?it.kode+' - '+it.nama:'(dihapus)', keluar, sat, varTxt, hasil, satH, std!=null?std:'', sel, ef, p.ket||'']);
+        var c = prodCv[cv] || (prodCv[cv] = {n:0, keluarNilai:0, hasil:0});
+        c.n++; c.hasil += hasil; c.keluarNilai += it ? (it.harga||0)*keluar : 0;
+      });
+    }
+    S.push({ judul:'4. Rincian Produksi per CV (Premix -> Roti)', sub:'CV = CV premix yang dipakai. Produksi gabungan dicatat atas premix utamanya. Efisiensi = hasil aktual / standar x 100.',
+      head:['Tanggal','CV Premix','Premix','Premix Keluar','Sat.','Rincian Varian','Total Hasil','Sat. Hasil','Standar Jadi','Selisih','Efisiensi (%)','Ket'],
+      types:['t','t','t','n','t','t','n','t','n','n','n','t'], rows:prodRows, total:[6] });
+    var prodSum = Object.keys(prodCv).sort().map(function(cv){ var c=prodCv[cv]; return [cv, c.n, c.keluarNilai, c.hasil]; });
+    S.push({ judul:'4b. Ringkasan Produksi per CV', sub:'Nilai premix terpakai = qty keluar x harga premix.',
+      head:['CV Premix','Jml Produksi','Nilai Premix Terpakai','Total Hasil Roti'], types:['t','n','r','n'], rows:prodSum, total:[1,2,3] });
+
+    // ---------- 5. PACKING: roti & kardus/bahan per CV ----------
+    var packRows = [], packCv = {};
+    packing.filter(function(p){ return inR(p.tanggal); }).slice().sort(function(a,b){ return String(a.tanggal).localeCompare(String(b.tanggal)); })
+    .forEach(function(p){
+      var cv = p.cv || NO_CV;
+      if(!lolosCv(cv)) return;
+      var pcs = (p.varian||[]).reduce(function(s,v){ return s+(v.jumlah||0); },0);
+      var list = p.bahanList && p.bahanList.length ? p.bahanList : (p.kardusItemId ? [{itemId:p.kardusItemId, qty:p.qtyKardus}] : []);
+      var nilaiK = 0;
+      var kTxt = list.map(function(b){ var it=itemById(b.itemId); if(it) nilaiK += (it.harga||0)*(b.qty||0); return (it?it.nama:'(dihapus)')+': '+num(b.qty); }).join(', ');
+      var tujuan = p.jenisTujuan ? p.jenisTujuan+' '+(p.cabang||'') : (p.cabang||'-');
+      var rTxt = (p.varian||[]).filter(function(v){ return v.jumlah>0; }).map(function(v){ return v.nama+': '+num(v.jumlah); }).join(', ');
+      packRows.push([p.tanggal, cv, tujuan, rTxt, pcs, kTxt||'-', nilaiK, p.ket||'']);
+      var c = packCv[cv] || (packCv[cv] = {n:0, pcs:0, nilaiK:0});
+      c.n++; c.pcs += pcs; c.nilaiK += nilaiK;
+    });
+    S.push({ judul:'5. Rincian Packing per CV (Roti + Kardus/Bahan)', sub:'Packing lama tanpa CV masuk ke "(Tanpa CV)". Packing harian (tabel tanggal 1-31) tetap dilihat di tab Rasio CV.',
+      head:['Tanggal','CV','Tujuan','Roti Dikemas','Total Pcs','Kardus/Bahan Dipakai','Nilai Kardus/Bahan','Ket'],
+      types:['t','t','t','t','n','t','r','t'], rows:packRows, total:[4,6] });
+    var packSum = Object.keys(packCv).sort().map(function(cv){ var c=packCv[cv]; return [cv, c.n, c.pcs, c.nilaiK]; });
+    S.push({ judul:'5b. Ringkasan Packing per CV', sub:'',
+      head:['CV','Jml Packing','Total Pcs','Nilai Kardus/Bahan'], types:['t','n','n','r'], rows:packSum, total:[1,2,3] });
+
+    // ---------- 6. STOK SAAT INI per CV x Kategori ----------
+    var stokRows = [], stokMat = {};
+    items.forEach(function(it){
+      var cv = cvItem[it.id] || NO_CV;
+      if(!lolosCv(cv) || !lolosKat(it.kategori)) return;
+      var sisa = stokItem(it.id).sisa, nilai = sisa*(it.harga||0);
+      stokRows.push([cv, katLabel(it.kategori), it.kode, it.nama, sisa, it.satuan, it.harga||0, nilai, sisa<0?'MINUS':(sisa===0?'Habis':'Aman')]);
+      var m = stokMat[cv] || (stokMat[cv] = {}); m[it.kategori] = (m[it.kategori]||0)+nilai;
+    });
+    stokRows.sort(function(a,b){ return String(a[0]).localeCompare(String(b[0])) || String(a[1]).localeCompare(String(b[1])) || String(a[3]).localeCompare(String(b[3])); });
+    var stokMatRows = Object.keys(stokMat).sort().map(function(cv){
+      var row=[cv], tot=0; kats.forEach(function(k){ var v=stokMat[cv][k]||0; row.push(v); tot+=v; }); row.push(tot); return row;
+    });
+    var tc = []; for(var j=1;j<=nK+1;j++) tc.push(j);
+    S.push({ judul:'6a. Nilai Stok Saat Ini per CV x Kategori (Rp)', sub:'Snapshot stok sekarang (tidak terikat periode). CV = CV terakhir barang di tab Masuk.',
+      head:['CV'].concat(kats.map(katLabel), ['Total']), types:['t'].concat(kats.map(function(){return 'r';}), ['r']), rows:stokMatRows, total:tc });
+    S.push({ judul:'6b. Rincian Stok Saat Ini per Barang', sub:'',
+      head:['CV','Kategori','Kode','Barang','Sisa','Satuan','Harga','Nilai Sisa','Status'],
+      types:['t','t','t','t','n','t','r','r','t'], rows:stokRows, total:[7] });
+
+    // ---------- 7. OPNAME: selisih per CV ----------
+    var opRows = [];
+    opname.filter(function(o){ return inR(o.tanggal); }).forEach(function(o){
+      (o.entries||[]).forEach(function(e){
+        if(e.selisih===0) return;
+        var it = itemById(e.itemId); if(!it) return;
+        var cv = cvItem[it.id] || NO_CV;
+        if(!lolosCv(cv) || !lolosKat(it.kategori)) return;
+        opRows.push([o.tanggal, o.jenis||'-', cv, katLabel(it.kategori), it.kode+' - '+it.nama, e.stokSistem, e.stokFisik, e.selisih, it.satuan, e.selisih*(it.harga||0), o.diterapkan?'Sudah disesuaikan':'Belum', e.alasan||'']);
+      });
+    });
+    opRows.sort(function(a,b){ return String(a[0]).localeCompare(String(b[0])); });
+    S.push({ judul:'7. Selisih Stock Opname per CV', sub:'Hanya barang yang stok fisiknya berbeda dari sistem.',
+      head:['Tanggal','Jenis','CV','Kategori','Barang','Stok Sistem','Stok Fisik','Selisih','Satuan','Nilai Selisih','Status','Alasan'],
+      types:['t','t','t','t','t','n','n','n','t','r','t','t'], rows:opRows, total:[9] });
+
+    return S;
+  }
+
+  function sel(v, t){
+    if(v===''||v==null) return '';
+    if(t==='r') return rupiah(v);
+    if(t==='n') return num(v);
+    return esc(v);
+  }
+
+  function tabelHtml(s){
+    var head = '<tr>'+s.head.map(function(h){ return '<th>'+esc(h)+'</th>'; }).join('')+'</tr>';
+    var body = s.rows.map(function(r){
+      return '<tr>'+r.map(function(v,i){
+        var neg = (s.types[i]==='n'||s.types[i]==='r') && Number(v)<0;
+        return '<td'+((s.types[i]!=='t')?' style="text-align:right;white-space:nowrap;'+(neg?'color:var(--red);':'')+'"':'')+'>'+sel(v,s.types[i])+'</td>';
+      }).join('')+'</tr>';
+    }).join('');
+    var foot = '';
+    if(s.total && s.rows.length){
+      foot = '<tr style="background:var(--wheat);font-weight:700;">'+s.head.map(function(h,i){
+        if(i===0) return '<td>TOTAL</td>';
+        if(s.total.indexOf(i)>=0){
+          var sum = s.rows.reduce(function(a,r){ return a+(parseFloat(r[i])||0); },0);
+          return '<td style="text-align:right;white-space:nowrap;">'+sel(sum,s.types[i])+'</td>';
+        }
+        return '<td></td>';
+      }).join('')+'</tr>';
+    }
+    return '<div style="overflow:auto;max-height:60vh;"><table><thead>'+head+'</thead><tbody>'
+      + (body || '<tr><td colspan="'+s.head.length+'" class="empty">Tidak ada data pada filter ini</td></tr>')
+      + foot + '</tbody></table></div>';
+  }
+
+  function viewAuditLengkap(){
+    if(!A.dari){ var n=new Date(); A.dari = n.getFullYear()+'-'+pad2(n.getMonth()+1)+'-01'; }
+    if(!A.sampai) A.sampai = today();
+    hasilSection = hitung();
+
+    var cvs = {}; SUPPLIERS.forEach(function(s){ cvs[s]=1; });
+    trx.forEach(function(t){ if(t.supplier) cvs[t.supplier]=1; });
+    var cvOpt = '<option value="">Semua CV</option>'+Object.keys(cvs).sort().concat([NO_CV]).map(function(c){ return '<option'+(c===A.cv?' selected':'')+'>'+esc(c)+'</option>'; }).join('');
+    var katOpt = '<option value="">Semua Kategori</option>'+semuaKat().map(function(k){ return '<option value="'+k+'"'+(k===A.kat?' selected':'')+'>'+esc(katLabel(k))+'</option>'; }).join('');
+
+    var ic = hitungInternalControlSnapshot(A.dari, A.sampai);
+    var alertHtml = ic.alerts.map(function(a){
+      var b = a.level==='red'?'Perlu Tindakan':(a.level==='amber'?'Perhatian':'Normal');
+      var cls = a.level==='red'?'sisa-low':(a.level==='green'?'sisa-ok':'');
+      var stl = a.level==='amber'?'color:var(--amber);font-weight:700;':'';
+      return '<div class="note" style="margin-bottom:5px;"><span class="'+cls+'" style="'+stl+'">['+b+']</span> '+a.text+'</div>';
+    }).join('');
+
+    return '<div class="card"><h2>Laporan Audit Lengkap per CV</h2>'
+      + '<div class="sub">Semua kategori (Premix, Bahan Baku, Kardus, Non Bahan) dipecah per CV: pembelian, pemakaian, produksi, packing, stok, dan opname. Angka dihitung ulang dari data terbaru setiap dibuka.</div>'
+      + '<form class="inline" id="form-audit2">'
+      + '<div class="field"><label>Dari Tanggal</label><input type="date" id="au2-dari" value="'+A.dari+'"></div>'
+      + '<div class="field"><label>Sampai Tanggal</label><input type="date" id="au2-sampai" value="'+A.sampai+'"></div>'
+      + '<div class="field"><label>CV</label><select id="au2-cv">'+cvOpt+'</select></div>'
+      + '<div class="field"><label>Kategori</label><select id="au2-kat">'+katOpt+'</select></div>'
+      + '<button class="primary" type="submit">Tampilkan</button>'
+      + '<button type="button" class="btn-sekunder" id="au2-refresh">🔄 Ambil Data Terbaru</button>'
+      + '<button type="button" class="btn-sekunder" id="au2-export">⬇ Export Excel (.xlsx)</button>'
+      + '</form></div>'
+      + hasilSection.map(function(s){
+          return '<div class="card"><h2>'+esc(s.judul)+'</h2>'+(s.sub?'<div class="sub">'+esc(s.sub)+'</div>':'')+tabelHtml(s)+'</div>';
+        }).join('')
+      + '<div class="card"><h2>8. Alert Internal Control</h2>'+alertHtml+'</div>';
+  }
+
+  function exportXlsx(){
+    if(typeof XLSX==='undefined'){ alert('Library Excel belum termuat.'); return; }
+    var wb = XLSX.utils.book_new();
+    var pakaiNama = {};
+    hasilSection.forEach(function(s){
+      var aoa = [s.head].concat(s.rows);
+      if(s.total && s.rows.length){
+        var tr = s.head.map(function(h,i){
+          if(i===0) return 'TOTAL';
+          return s.total.indexOf(i)>=0 ? s.rows.reduce(function(a,r){ return a+(parseFloat(r[i])||0); },0) : '';
+        });
+        aoa.push(tr);
+      }
+      var ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = s.head.map(function(h,i){
+        var w = String(h).length+2;
+        s.rows.slice(0,200).forEach(function(r){ w = Math.max(w, String(r[i]==null?'':r[i]).length+2); });
+        return {wch:Math.min(w,45)};
+      });
+      var nama = s.judul.replace(/[\\\/\?\*\[\]:]/g,'').slice(0,28);
+      var asli = nama, c = 1; while(pakaiNama[nama]){ nama = asli.slice(0,25)+'_'+(++c); }
+      pakaiNama[nama] = 1;
+      XLSX.utils.book_append_sheet(wb, ws, nama);
+    });
+    XLSX.writeFile(wb, 'audit-lengkap-per-cv-'+A.dari+'_sd_'+A.sampai+'.xlsx');
+  }
+
+  function pasangHandler(){
+    var $ = function(id){ return document.getElementById(id); };
+    $('form-audit2').onsubmit = function(e){
+      e.preventDefault();
+      A = { dari:$('au2-dari').value, sampai:$('au2-sampai').value, cv:$('au2-cv').value, kat:$('au2-kat').value };
+      renderAll();
+    };
+    $('au2-refresh').onclick = async function(){ this.disabled = true; await loadAll(); updateDbStatusBadge(); renderAll(); };
+    $('au2-export').onclick = exportXlsx;
+  }
+
+  var _renderAsli = renderAll;
+  renderAll = function(){
+    if(activeTab!=='audit') return _renderAsli.apply(this, arguments);
+    renderNav();
+    var main = document.getElementById('main');
+    try{
+      main.innerHTML = viewAuditLengkap();
+      pasangHandler();
+    }catch(e){
+      console.error('Audit lengkap gagal:', e);
+      main.innerHTML = '<div class="card"><h2 style="color:var(--red)">Error Laporan Audit</h2><div class="note">'+esc(e.message||e)+'</div></div>';
+    }
+  };
+  if(activeTab==='audit') renderAll();
+})();
+</script>
