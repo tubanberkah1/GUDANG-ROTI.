@@ -5436,12 +5436,22 @@ subscribeRealtime = function(){
   pasangTombol(); setTimeout(pasangTombol, 800);
 })();
 </script>
-// ============================================================================
-// MODUL BARU — Packing Tabel, Master Harga, Rasio CV, Laporan Audit, Export xlsx
-// TEMPEL SEKALI, tepat di atas </script> paling bawah index.html
-// ============================================================================
 
-// ---------- PENGATURAN (ubah di sini kalau nama field di datamu berbeda) ----------
+<script>
+(function () {
+  function tampilkanError(e) {
+    console.error('MODUL BARU GAGAL:', e);
+    try {
+      var d = document.createElement('div');
+      d.style.cssText = 'background:#fdecea;color:#b4442e;padding:10px 14px;font:13px sans-serif;border-bottom:2px solid #b4442e;';
+      d.textContent = 'Modul baru gagal dimuat: ' + (e && e.message ? e.message : e);
+      document.body.insertBefore(d, document.body.firstChild);
+    } catch (x) {}
+  }
+  try { modulBaru(); } catch (e) { tampilkanError(e); }
+
+  function modulBaru() {
+
 var CFG = {
   cvDariTrx: function (t) { return t.supplier || t.cv || ''; },
   premixDariProduksi: function (p) { return p.itemId || p.premixId || p.premixItemId || ''; }
@@ -5449,8 +5459,6 @@ var CFG = {
 var DEFAULT_TARGET_CV = { Ronggolawe: 30, Berkah: 35, Jatimerak: 35 };
 var CV_KOSONG = '(CV belum terdeteksi)';
 
-// ---------- STATE & KONSTANTA ----------
-var NAMA_VAR = { harga_produk: 'hargaProduk', packing_harian: 'packingHarian', pengaturan_cv: 'pengaturanCv' };
 var DATASETS_BARU = ['harga_produk', 'packing_harian', 'pengaturan_cv'];
 var TAB_BARU = ['packingtabel', 'hargaproduk', 'rasiocv', 'audit'];
 var hargaProduk = [], packingHarian = [], pengaturanCv = [];
@@ -5462,7 +5470,6 @@ var hpEditId = null, hpHasilImpor = null;
 var rasioPeriode = { bulan: new Date().getMonth() + 1, tahun: new Date().getFullYear() };
 var auditFilter = { dari: null, sampai: null, cv: '' };
 
-// ---------- UTILITAS ----------
 function normKey(s) { return String(s == null ? '' : s).toLowerCase().replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim(); }
 function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 function angka(n) { return (Number(n) || 0).toLocaleString('id-ID', { maximumFractionDigits: 2 }); }
@@ -5472,7 +5479,6 @@ function periodeStr(p) { p = p || pkPeriode; return p.tahun + '-' + pad2(p.bulan
 function hariDalamBulan(p) { p = p || pkPeriode; return new Date(p.tahun, p.bulan, 0).getDate(); }
 function selisihTxt(n) { return (n > 0 ? '+' : '') + (Number(n) || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 }); }
 
-// ---------- AKSES DATABASE (simpan PER BARIS, bukan hapus-semua) ----------
 async function dbUpsert(table, rec) {
   var r = await sb.from(table).upsert({ id: rec.id, data: rec }, { onConflict: 'id' });
   if (r.error) throw r.error;
@@ -5486,13 +5492,15 @@ async function dbGet(table, id) {
   if (r.error) throw r.error;
   return r.data ? r.data.data : null;
 }
+function getArr(t) { return t === 'harga_produk' ? hargaProduk : (t === 'packing_harian' ? packingHarian : pengaturanCv); }
+function setArr(t, a) { if (t === 'harga_produk') hargaProduk = a; else if (t === 'packing_harian') packingHarian = a; else pengaturanCv = a; }
 function lokalSet(table, rec) {
-  var arr = window[NAMA_VAR[table]];
+  var arr = getArr(table);
   var i = arr.findIndex(function (x) { return x.id === rec.id; });
   if (i >= 0) arr[i] = rec; else arr.push(rec);
 }
 function lokalHapus(table, id) {
-  window[NAMA_VAR[table]] = window[NAMA_VAR[table]].filter(function (x) { return x.id !== id; });
+  setArr(table, getArr(table).filter(function (x) { return x.id !== id; }));
 }
 async function dbSimpan(table, rec) {
   try { await dbUpsert(table, rec); lokalSet(table, rec); return true; }
@@ -5507,7 +5515,6 @@ async function dbHapus(table, id) {
   catch (e) { console.error(e); alert('Gagal menghapus: ' + (e.message || e)); return false; }
 }
 
-// ---------- HARGA ----------
 function statusHarga(key) {
   var list = hargaProduk.filter(function (h) { return h.key === key; });
   if (list.length === 0) return { rec: null, status: 'belum' };
@@ -5522,7 +5529,6 @@ function hargaSel(cell, key) {
   return h ? (Number(h.harga) || 0) : 0;
 }
 
-// ---------- CV OTOMATIS DARI PREMIX MASUK ----------
 function cvUntukVarian(nama, tgl) {
   var prods = produksi.filter(function (p) { return (p.varianHasil || []).some(function (v) { return v.nama === nama; }); });
   if (prods.length === 0) return '';
@@ -5536,7 +5542,6 @@ function cvUntukVarian(nama, tgl) {
   return t ? CFG.cvDariTrx(t) : '';
 }
 
-// ---------- AGREGAT (dihitung ULANG dari data setiap dipanggil) ----------
 function agregatPacking(dari, sampai, cvFilter) {
   var out = [];
   packingHarian.forEach(function (r) {
@@ -5599,13 +5604,10 @@ function htmlTabelRasio(cells) {
   return '<table><thead><tr><th>CV</th><th>Total Qty</th><th>Total Nilai</th><th>Rasio Realisasi (Qty)</th><th>Rasio Realisasi (Nilai)</th><th>Target Rasio</th><th>Selisih (Qty)</th><th>Selisih (Nilai)</th></tr></thead><tbody>' +
     (body || '<tr><td colspan="8" class="empty">Belum ada data packing pada periode ini</td></tr>') +
     '</tbody><tfoot><tr><td><b>TOTAL</b></td><td class="pk-num"><b>' + angka(h.totalQty) + '</b></td><td class="pk-num"><b>' + rupiah(h.totalNilai) + '</b></td><td></td><td></td><td class="pk-num"><b>' + pct(totTarget) + '</b></td><td></td><td></td></tr></tfoot></table>' +
-    '<div class="note">Rasio Qty = Qty CV ÷ total Qty × 100%. Rasio Nilai = Nilai CV ÷ total Nilai × 100%. Selisih = realisasi − target (dalam poin persen).' +
-    (Math.round(totTarget) !== 100 ? ' <span class="sisa-low">Total target ' + pct(totTarget) + ' (bukan 100%) — cek di Pengaturan Rasio CV.</span>' : '') + '</div>';
+    '<div class="note">Rasio Qty = Qty CV ÷ total Qty × 100%. Rasio Nilai = Nilai CV ÷ total Nilai × 100%. Selisih = realisasi − target (poin persen).' +
+    (Math.round(totTarget) !== 100 ? ' <span class="sisa-low">Total target ' + pct(totTarget) + ' (bukan 100%) — cek Pengaturan Rasio CV.</span>' : '') + '</div>';
 }
 
-// ============================================================================
-// EXPORT .xlsx ASLI (angka tetap angka, bisa dipakai rumus)
-// ============================================================================
 function tambahSheet(wb, nama, header, rows, opsi) {
   opsi = opsi || {};
   var n = rows.length;
@@ -5673,9 +5675,6 @@ function exportDetailXlsx(cells, namaFile) {
   XLSX.writeFile(wb, namaFile);
 }
 
-// ============================================================================
-// TAB: PACKING TABEL (1–31, seperti Excel)
-// ============================================================================
 function pkBarisProduk(per) {
   var m = {};
   semuaVarianNama().forEach(function (n) { m[normKey(n)] = { key: normKey(n), nama: n }; });
@@ -5733,7 +5732,7 @@ function viewPackingTabel() {
 
   return '<div class="card">' +
     '<h2>Packing Harian (Tabel 1–' + nHari + ')</h2>' +
-    '<div class="sub">Pilih bulan, lalu isi jumlah yang dipacking langsung di kolom tanggalnya. CV diambil otomatis dari Premix Masuk, harga dari Master Harga. Tab/Enter/panah untuk pindah sel.</div>' +
+    '<div class="sub">Pilih bulan, lalu isi jumlah yang dipacking langsung di kolom tanggalnya. CV diambil otomatis dari Premix Masuk, harga dari Master Harga. Enter/panah atas-bawah untuk pindah sel.</div>' +
     '<form class="inline" id="form-pk-periode" onsubmit="return false;">' +
     '<div class="field"><label>Bulan</label><select id="pk-bulan">' + bulanOpt + '</select></div>' +
     '<div class="field"><label>Tahun</label><select id="pk-tahun">' + tahunOpt + '</select></div>' +
@@ -5769,7 +5768,8 @@ function pkHitungUlang() {
   });
   tbl.querySelectorAll('.pk-fday').forEach(function (td) { td.textContent = days[td.dataset.hari] ? angka(days[td.dataset.hari]) : ''; });
   var a = document.getElementById('pk-gq'), b = document.getElementById('pk-gn');
-  if (a) a.textContent = angka(gq); if (b) b.textContent = rupiah(gn);
+  if (a) a.textContent = angka(gq);
+  if (b) b.textContent = rupiah(gn);
 }
 function pkStatus(teks, cls) {
   var el = document.getElementById('pk-status'); if (!el) return;
@@ -5788,8 +5788,6 @@ function pkOnInput(e) {
   if (pkAutosave) pkTimer = setTimeout(function () { pkSimpanSemua(true); }, 2000);
 }
 
-// Simpan AMAN multi-perangkat: tiap baris (produk+bulan) diambil dulu dari database,
-// hanya sel yang diubah yang digabung, lalu disimpan. Data perangkat lain tidak terhapus.
 async function pkSimpanSemua(diam) {
   if (pkSaving) return;
   var draftList = Object.keys(pkDraft).map(function (k) { return { k: k, d: pkDraft[k] }; });
@@ -5797,12 +5795,14 @@ async function pkSimpanSemua(diam) {
   pkSaving = true; pkStatus('Menyimpan...', 'pk-status-warn');
   var grp = {};
   draftList.forEach(function (x) { var id = x.d.periode + '|' + x.d.key; (grp[id] = grp[id] || []).push(x); });
-  var gagal = 0;
-  for (var id in grp) {
+  var gagal = 0, ids = Object.keys(grp);
+  for (var gi = 0; gi < ids.length; gi++) {
+    var id = ids[gi];
     try {
       var items0 = grp[id], first = items0[0].d;
       var rec = await dbGet('packing_harian', id);
       if (!rec) rec = { id: id, periode: first.periode, key: first.key, nama: first.nama, hari: {} };
+      if (!rec.hari) rec.hari = {};
       items0.forEach(function (x) {
         var d = x.d, tgl = d.periode + '-' + pad2(d.hari);
         if (!(d.qty > 0)) { delete rec.hari[d.hari]; return; }
@@ -5823,7 +5823,7 @@ async function pkSimpanSemua(diam) {
     } catch (e) { gagal++; console.error('Gagal simpan packing', id, e); }
   }
   pkSaving = false;
-  if (gagal) { pkStatus('⚠ ' + gagal + ' baris gagal disimpan — cek koneksi / SQL tabel baru', 'pk-status-warn'); if (!diam) alert('Sebagian data gagal disimpan. Data yang belum tersimpan tetap ada di layar; coba klik Simpan Semua lagi.'); return; }
+  if (gagal) { pkStatus('⚠ ' + gagal + ' baris gagal disimpan — cek koneksi / SQL tabel baru', 'pk-status-warn'); if (!diam) alert('Sebagian data gagal disimpan. Coba klik Simpan Semua lagi.'); return; }
   pkStatus();
   if (!diam && activeTab === 'packingtabel') renderAll();
 }
@@ -5855,9 +5855,6 @@ async function pkExport() {
   XLSX.writeFile(wb, 'packing-' + per + '.xlsx');
 }
 
-// ============================================================================
-// TAB: MASTER HARGA
-// ============================================================================
 function hpParseTeks(teks) {
   var entries = [], tanpaNama = [], abaikan = [];
   String(teks || '').split(/\r?\n/).forEach(function (raw) {
@@ -5895,7 +5892,7 @@ async function hpImpor(teks) {
     tambah.forEach(function (hg) {
       baru.push({ id: uid(), nama: g.nama, key: k, harga: hg, kategori: hpTebakKategori(g.nama), aktif: (exist.length === 0 && g.hargas.length === 1), riwayat: [], dibuat: today(), sumber: 'impor' });
     });
-    if (exist.length + tambah.length > 1 && !adaAktif) konflik.push({ nama: g.nama, hargas: exist.map(function (h) { return h.harga; }).concat(tambah.map(function (r) { return r.harga; })) });
+    if (exist.length + tambah.length > 1 && !adaAktif) konflik.push({ nama: g.nama, hargas: exist.map(function (h) { return h.harga; }).concat(tambah) });
   });
   try {
     for (var i = 0; i < baru.length; i += 200) {
@@ -5917,7 +5914,7 @@ function viewHargaProduk() {
   var katOpt = function (sel) { return KAT.map(function (k) { return '<option' + (k === sel ? ' selected' : '') + '>' + k + '</option>'; }).join(''); };
 
   var konflikHtml = konflik.length === 0 ? '' :
-    '<div class="card"><h2>⚠ Perlu Ditinjau (' + konflik.length + ' produk)</h2><div class="sub">Nama sama tetapi harga berbeda. Belum ada yang dipilih — selama belum dipilih, produk ini tidak punya harga di Packing. Klik "Pakai harga ini" pada yang berlaku.</div>' +
+    '<div class="card"><h2>⚠ Perlu Ditinjau (' + konflik.length + ' produk)</h2><div class="sub">Nama sama tetapi harga berbeda. Selama belum dipilih, produk ini tidak punya harga di Packing. Klik "Pakai harga ini" pada yang berlaku.</div>' +
     '<table><thead><tr><th>Produk</th><th>Pilihan Harga</th></tr></thead><tbody>' +
     konflik.map(function (g) {
       return '<tr><td>' + esc(g[0].nama) + '</td><td>' + g.map(function (h) {
@@ -5940,30 +5937,27 @@ function viewHargaProduk() {
   if (hpHasilImpor) {
     var r = hpHasilImpor;
     hasil = '<div class="card" style="background:var(--cream);"><h2>Hasil Impor</h2><div class="note" style="font-size:12.5px;">' +
-      '✅ ' + r.baru + ' harga baru masuk · ' + r.sudahAda + ' sudah ada (dilewati) · ⚠ ' + r.konflik.length + ' produk perlu ditinjau · ' + r.tanpaNama.length + ' baris tanpa nama · ' + r.abaikan.length + ' baris diabaikan' + '</div>' +
-      (r.tanpaNama.length ? '<div class="note"><b>Baris hanya angka (tidak ada nama, TIDAK diimpor):</b> ' + esc(r.tanpaNama.join(', ')) + '. Tambahkan manual di form di atas kalau memang produk.</div>' : '') +
-      (r.abaikan.length ? '<div class="note"><b>Diabaikan (tanpa harga / harga 0):</b> ' + esc(r.abaikan.join(' | ')) + '</div>' : '') + '</div>';
+      '✅ ' + r.baru + ' harga baru masuk · ' + r.sudahAda + ' sudah ada (dilewati) · ⚠ ' + r.konflik.length + ' produk perlu ditinjau · ' + r.tanpaNama.length + ' baris tanpa nama · ' + r.abaikan.length + ' baris diabaikan</div>' +
+      (r.tanpaNama.length ? '<div class="note"><b>Baris hanya angka (tidak diimpor):</b> ' + esc(r.tanpaNama.join(', ')) + '</div>' : '') +
+      (r.abaikan.length ? '<div class="note"><b>Diabaikan:</b> ' + esc(r.abaikan.join(' | ')) + '</div>' : '') + '</div>';
   }
 
   return konflikHtml +
-    '<div class="card"><h2>Master Harga Produk</h2><div class="sub">Harga tidak dikunci — bisa ditambah, diedit, dihapus kapan saja. Harga aktif dipakai otomatis di Packing berdasarkan nama produk.</div>' +
+    '<div class="card"><h2>Master Harga Produk</h2><div class="sub">Harga bisa ditambah, diedit, dihapus kapan saja. Harga aktif dipakai otomatis di Packing berdasarkan nama produk.</div>' +
     '<form class="inline" id="form-hp-tambah"><div class="field"><label>Nama Produk</label><input id="hp-nama" required style="min-width:200px;"></div>' +
     '<div class="field"><label>Harga (Rp)</label><input id="hp-harga" type="number" min="0" step="any" required></div>' +
     '<div class="field"><label>Kategori</label><select id="hp-kat">' + katOpt('Roti/Kue') + '</select></div>' +
     '<button class="primary" type="submit">+ Tambah Produk</button></form></div>' +
-    '<div class="card"><h2>Impor Daftar Harga</h2><div class="sub">Tempel daftar "nama harga" (satu produk per baris, contoh: <code>floss roll pcs 10500</code>). Nama yang sudah ada dengan harga sama dilewati. Nama sama dengan harga berbeda TIDAK menimpa — masuk ke "Perlu Ditinjau".</div>' +
-    '<textarea id="hp-teks" rows="6" style="width:100%;font-size:12px;border:1px solid var(--line);border-radius:6px;padding:8px;" placeholder="floss roll pcs 10500&#10;manis abon 8500&#10;..."></textarea>' +
-    '<div style="margin-top:8px;"><button type="button" class="primary" id="hp-impor-btn">⬆ Proses & Impor</button></div></div>' + hasil +
+    '<div class="card"><h2>Impor Daftar Harga</h2><div class="sub">Tempel daftar "nama harga" (satu produk per baris, contoh: <code>floss roll pcs 10500</code>). Nama sama dengan harga berbeda TIDAK menimpa — masuk "Perlu Ditinjau".</div>' +
+    '<textarea id="hp-teks" rows="6" style="width:100%;font-size:12px;border:1px solid var(--line);border-radius:6px;padding:8px;" placeholder="floss roll pcs 10500&#10;manis abon 8500"></textarea>' +
+    '<div style="margin-top:8px;"><button type="button" class="primary" id="hp-impor-btn">⬆ Proses &amp; Impor</button></div></div>' + hasil +
     '<div class="card"><h2>Daftar Harga (' + hargaProduk.length + ')</h2>' +
     '<div class="field" style="max-width:320px;margin-bottom:8px;"><label>Cari produk</label><input id="hp-cari" placeholder="ketik nama..."></div>' +
     '<div style="overflow:auto;max-height:65vh;"><table id="hp-table"><thead><tr><th>No</th><th>Nama Produk</th><th>Harga</th><th>Kategori</th><th>Status</th><th>Riwayat Harga</th><th></th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="7" class="empty">Belum ada data — tambahkan di atas atau impor daftar harga</td></tr>') + '</tbody></table></div>' +
-    '<div class="note">Mengganti NAMA produk hanya memengaruhi pencocokan ke depan; packing yang sudah tersimpan tetap memakai nama & harga saat itu.</div></div>';
+    '<div class="note">Mengganti NAMA produk hanya memengaruhi pencocokan ke depan; packing yang sudah tersimpan tetap memakai nama &amp; harga saat itu.</div></div>';
 }
 
-// ============================================================================
-// TAB: RASIO CV
-// ============================================================================
 function viewRasioCV() {
   var per = periodeStr(rasioPeriode), nHari = hariDalamBulan(rasioPeriode);
   var cells = agregatPacking(per + '-01', per + '-' + pad2(nHari), '');
@@ -5974,7 +5968,7 @@ function viewRasioCV() {
   var tRows = Object.keys(tg).map(function (cv) {
     return '<tr><td>' + esc(cv) + '</td><td><input type="number" min="0" max="100" step="any" class="rasio-target" data-cv="' + esc(cv) + '" value="' + tg[cv] + '" style="width:80px;"> %</td><td><button class="danger" data-rasio-hapus="' + esc(cv) + '">Hapus</button></td></tr>';
   }).join('');
-  return '<div class="card"><h2>Rasio Realisasi per CV</h2><div class="sub">Dihitung otomatis dari data Packing Harian pada bulan yang dipilih (selalu data terbaru).</div>' +
+  return '<div class="card"><h2>Rasio Realisasi per CV</h2><div class="sub">Dihitung otomatis dari data Packing Harian pada bulan yang dipilih.</div>' +
     '<form class="inline" onsubmit="return false;"><div class="field"><label>Bulan</label><select id="rasio-bulan">' + bulanOpt + '</select></div><div class="field"><label>Tahun</label><select id="rasio-tahun">' + tahunOpt + '</select></div>' +
     '<button type="button" class="btn-sekunder" id="rasio-export">⬇ Export Excel (.xlsx)</button></form>' + htmlTabelRasio(cells) + '</div>' +
     '<div class="card"><h2>Pengaturan Rasio CV</h2><div class="sub">Target bisa diubah kapan saja.</div>' +
@@ -5987,9 +5981,6 @@ async function rasioSimpanTarget(tg) {
   if (ok) renderAll();
 }
 
-// ============================================================================
-// TAB: LAPORAN AUDIT — dihitung ULANG dari data terbaru setiap tampil
-// ============================================================================
 function viewAudit() {
   var now = new Date(), f = auditFilter;
   var dari = f.dari != null ? f.dari : (now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-01');
@@ -6026,7 +6017,7 @@ function viewAudit() {
     return '<tr><td>' + r[0] + '</td><td>' + esc(r[1]) + '</td><td>' + esc(r[2]) + '</td><td class="pk-num">' + angka(r[3]) + '</td><td class="pk-num">' + rupiah(r[4]) + '</td><td class="pk-num">' + rupiah(r[5]) + '</td></tr>';
   }).join('');
 
-  return '<div class="card"><h2>Laporan Audit</h2><div class="sub">Semua angka di halaman ini dihitung ulang dari data terbaru di database setiap kali halaman dibuka, di-refresh, atau data berubah (Packing, Produksi, Premix Masuk, Stok Masuk/Keluar, Opname). Tidak ada total yang disimpan terpisah.</div>' +
+  return '<div class="card"><h2>Laporan Audit</h2><div class="sub">Semua angka dihitung ulang dari data terbaru setiap halaman dibuka atau data berubah. Tidak ada total yang disimpan terpisah.</div>' +
     '<form class="inline" id="form-audit"><div class="field"><label>Dari Tanggal</label><input type="date" id="audit-dari" value="' + dari + '"></div><div class="field"><label>Sampai Tanggal</label><input type="date" id="audit-sampai" value="' + sampai + '"></div><div class="field"><label>CV</label><select id="audit-cv">' + cvOpt + '</select></div>' +
     '<button class="primary" type="submit">Tampilkan</button><button type="button" class="btn-sekunder" id="audit-refresh">🔄 Ambil Data Terbaru</button><button type="button" class="btn-sekunder" id="audit-export">⬇ Export Excel (.xlsx)</button></form></div>' +
     '<div class="card"><h2>A. Nilai Potensi Penjualan dari Barang Packing</h2><div class="grid">' +
@@ -6034,7 +6025,7 @@ function viewAudit() {
     '<div class="stat pos"><div class="label">NILAI POTENSI PENJUALAN DARI BARANG PACKING</div><div class="value">' + rupiah(totNilai) + '</div></div>' +
     '<div class="stat"><div class="label">Packing Lama (tanpa harga/CV)</div><div class="value">' + angka(packingLamaQty(dari, sampai)) + ' pcs</div></div>' +
     '<div class="stat"><div class="label">Omzet Penjualan/Kasir (uang masuk sebenarnya)</div><div class="value">' + rupiah(penjualan.filter(function (p) { return inR(p.tanggal); }).reduce(function (s, p) { return s + (p.omzet || 0); }, 0)) + '</div></div></div>' +
-    '<div class="note">Nilai potensi = berapa nilai barang yang berpotensi jadi uang masuk bila terjual. Bukan uang masuk; uang masuk sebenarnya hanya dari data Penjualan/Kasir.' +
+    '<div class="note">Nilai potensi bukan uang masuk; uang masuk sebenarnya hanya dari data Penjualan/Kasir.' +
     (tanpaHarga ? ' <span class="sisa-low">' + tanpaHarga + ' sel packing dicatat saat harga belum ada (dihitung dengan harga aktif sekarang).</span>' : '') +
     (tanpaCv ? ' <span class="sisa-low">' + tanpaCv + ' sel packing CV-nya belum terdeteksi dari Premix Masuk.</span>' : '') + '</div></div>' +
     '<div class="card"><h2>B. Rekap per CV &amp; Rasio terhadap Target</h2>' + htmlTabelRasio(cells) + '</div>' +
@@ -6051,9 +6042,6 @@ function viewAudit() {
     (detailRows || '<tr><td colspan="6" class="empty">Belum ada data packing harian pada periode/filter ini</td></tr>') + '</tbody></table></div></div>';
 }
 
-// ============================================================================
-// PASANG EVENT (dipanggil dari renderAll setelah tampilan dibuat)
-// ============================================================================
 function attachHandlersBaru() {
   var $ = function (id) { return document.getElementById(id); };
   if (activeTab === 'packingtabel') {
@@ -6075,12 +6063,12 @@ function attachHandlersBaru() {
     tbl.addEventListener('input', function (e) { if (e.target.classList.contains('pk-cell')) pkOnInput(e); });
     tbl.addEventListener('keydown', function (e) {
       if (!e.target.classList.contains('pk-cell')) return;
-      var r = Number(e.target.dataset.r), c = Number(e.target.dataset.c), nr = r, nc = c;
+      var r = Number(e.target.dataset.r), c = Number(e.target.dataset.c), nr = r;
       if (e.key === 'Enter' || e.key === 'ArrowDown') nr = r + 1;
       else if (e.key === 'ArrowUp') nr = r - 1;
       else return;
       e.preventDefault();
-      var next = tbl.querySelector('.pk-cell[data-r="' + nr + '"][data-c="' + nc + '"]');
+      var next = tbl.querySelector('.pk-cell[data-r="' + nr + '"][data-c="' + c + '"]');
       if (next) { next.focus(); next.select(); }
     });
     pkHitungUlang(); pkStatus();
@@ -6093,7 +6081,7 @@ function attachHandlersBaru() {
       var key = normKey(nama), ada = hargaProduk.filter(function (h) { return h.key === key; });
       if (ada.length) {
         var daftar = ada.map(function (h) { return rupiah(h.harga) + (h.aktif ? ' (aktif)' : ''); }).join(', ');
-        if (!confirm('"' + nama + '" sudah ada di Master Harga: ' + daftar + '.\n\nUntuk MENGUBAH harga, batalkan lalu pakai tombol Edit pada produk itu.\nTekan OK hanya jika ini memang harga tambahan/alternatif (akan masuk "Perlu Ditinjau").')) return;
+        if (!confirm('"' + nama + '" sudah ada di Master Harga: ' + daftar + '.\n\nUntuk MENGUBAH harga, batalkan lalu pakai tombol Edit.\nTekan OK hanya jika ini harga tambahan/alternatif.')) return;
         if (ada.some(function (h) { return h.harga === harga; })) { alert('Harga yang sama sudah ada.'); return; }
         await dbSimpan('harga_produk', { id: uid(), nama: nama, key: key, harga: harga, kategori: kat, aktif: false, riwayat: [], dibuat: today(), sumber: 'manual' });
       } else {
@@ -6122,7 +6110,7 @@ function attachHandlersBaru() {
     document.querySelectorAll('[data-hp-hapus]').forEach(function (b) {
       b.onclick = async function () {
         var rec = hargaProduk.find(function (h) { return h.id === b.dataset.hpHapus; }); if (!rec) return;
-        if (!confirm('Hapus "' + rec.nama + '" (' + rupiah(rec.harga) + ') dari Master Harga?\nPacking yang sudah tersimpan tidak berubah (harga sudah tersimpan di tiap tanggal).')) return;
+        if (!confirm('Hapus "' + rec.nama + '" (' + rupiah(rec.harga) + ') dari Master Harga?\nPacking yang sudah tersimpan tidak berubah.')) return;
         if (await dbHapus('harga_produk', rec.id)) renderAll();
       };
     });
@@ -6178,99 +6166,102 @@ window.addEventListener('beforeunload', function (e) {
   if (Object.keys(pkDraft).length > 0) { e.preventDefault(); e.returnValue = ''; }
 });
 
-// ============================================================================
-// PENYAMBUNG OTOMATIS KE KODE LAMA — tidak perlu edit bagian lain index.html
-// ============================================================================
-(function () {
-  // 1) CSS tabel Excel
-  var css = `
-.pk-wrap { overflow: auto; max-height: 68vh; border: 1px solid var(--line); border-radius: 8px; background: var(--white); }
-.pk-wrap table { margin-top: 0; font-size: 12px; border-collapse: separate; border-spacing: 0; }
-.pk-wrap th, .pk-wrap td { padding: 3px 5px; white-space: nowrap; border: 1px solid var(--line); }
-.pk-wrap thead th { position: sticky; top: 0; z-index: 3; background: var(--cream); text-align: center; }
-.pk-wrap .pk-sticky1 { position: sticky; left: 0; z-index: 2; background: var(--white); min-width: 34px; }
-.pk-wrap .pk-sticky2 { position: sticky; left: 34px; z-index: 2; background: var(--white); min-width: 170px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; text-align: left; }
-.pk-wrap thead .pk-sticky1, .pk-wrap thead .pk-sticky2 { z-index: 4; background: var(--cream); }
-.pk-wrap tfoot td { position: sticky; bottom: 0; z-index: 3; background: var(--wheat); font-weight: 700; text-align: right; }
-.pk-cell { width: 50px; padding: 4px 3px; border: 1px solid transparent; background: var(--white); text-align: right; font-size: 12px; color: var(--brown); border-radius: 3px; }
-.pk-cell:focus { outline: 2px solid var(--amber); background: rgb(255,249,230); }
-.pk-cell.pk-dirty { background: rgb(255,243,205); }
-.pk-minggu { background: rgb(250,235,230); }
-.pk-num { text-align: right; font-variant-numeric: tabular-nums; }
-.pk-status-ok { color: var(--teal); font-weight: 700; }
-.pk-status-warn { color: var(--amber); font-weight: 700; }
-.btn-sekunder { background: var(--white); border: 1px solid var(--line); color: var(--brown); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
-.btn-sekunder:hover { background: var(--cream); }
-.hp-nonaktif td { color: var(--brown-soft); }
-`;
-  var st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
+// ===== PENYAMBUNG KE KODE LAMA =====
 
-  // 2) Tab baru, disisipkan tepat setelah tab "Packing"
-  var baru = [{ id: 'packingtabel', label: 'Packing Tabel' }, { id: 'hargaproduk', label: 'Master Harga' }, { id: 'rasiocv', label: 'Rasio CV' }, { id: 'audit', label: 'Laporan Audit' }];
-  var pos = TABS.findIndex(function (t) { return t.id === 'packing'; });
-  pos = pos >= 0 ? pos + 1 : TABS.length;
-  baru.forEach(function (b) { if (!TABS.some(function (t) { return t.id === b.id; })) { TABS.splice(pos, 0, b); pos++; } });
+// 1) CSS
+var css = '' +
+'.pk-wrap { overflow: auto; max-height: 68vh; border: 1px solid var(--line); border-radius: 8px; background: var(--white); }\n' +
+'.pk-wrap table { margin-top: 0; font-size: 12px; border-collapse: separate; border-spacing: 0; }\n' +
+'.pk-wrap th, .pk-wrap td { padding: 3px 5px; white-space: nowrap; border: 1px solid var(--line); }\n' +
+'.pk-wrap thead th { position: sticky; top: 0; z-index: 3; background: var(--cream); text-align: center; }\n' +
+'.pk-wrap .pk-sticky1 { position: sticky; left: 0; z-index: 2; background: var(--white); min-width: 34px; }\n' +
+'.pk-wrap .pk-sticky2 { position: sticky; left: 34px; z-index: 2; background: var(--white); min-width: 170px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; text-align: left; }\n' +
+'.pk-wrap thead .pk-sticky1, .pk-wrap thead .pk-sticky2 { z-index: 4; background: var(--cream); }\n' +
+'.pk-wrap tfoot td { position: sticky; bottom: 0; z-index: 3; background: var(--wheat); font-weight: 700; text-align: right; }\n' +
+'.pk-cell { width: 50px; padding: 4px 3px; border: 1px solid transparent; background: var(--white); text-align: right; font-size: 12px; color: var(--brown); border-radius: 3px; }\n' +
+'.pk-cell:focus { outline: 2px solid var(--amber); background: rgb(255,249,230); }\n' +
+'.pk-cell.pk-dirty { background: rgb(255,243,205); }\n' +
+'.pk-minggu { background: rgb(250,235,230); }\n' +
+'.pk-num { text-align: right; font-variant-numeric: tabular-nums; }\n' +
+'.pk-status-ok { color: var(--teal); font-weight: 700; }\n' +
+'.pk-status-warn { color: var(--amber); font-weight: 700; }\n' +
+'.btn-sekunder { background: var(--white); border: 1px solid var(--line); color: var(--brown); padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }\n' +
+'.btn-sekunder:hover { background: var(--cream); }\n' +
+'.hp-nonaktif td { color: var(--brown-soft); }\n';
+var st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
 
-  // 3) loadAll: tetap pakai yang lama, lalu muat 3 tabel baru
-  var loadAllLama = loadAll;
-  loadAll = async function () {
-    await loadAllLama();
-    for (var i = 0; i < DATASETS_BARU.length; i++) {
-      var k = DATASETS_BARU[i];
-      try {
-        var r = await sb.from(k).select('data').order('created_at', { ascending: true });
-        if (r.error) throw r.error;
-        window[NAMA_VAR[k]] = (r.data || []).map(function (x) { return x.data; });
-      } catch (e) {
-        console.warn('Tabel baru belum siap / gagal dimuat:', k, e);
-        window[NAMA_VAR[k]] = window[NAMA_VAR[k]] || [];
-      }
+// 2) Tab baru setelah "Packing"
+var baruTab = [{ id: 'packingtabel', label: 'Packing Tabel' }, { id: 'hargaproduk', label: 'Master Harga' }, { id: 'rasiocv', label: 'Rasio CV' }, { id: 'audit', label: 'Laporan Audit' }];
+var pos = TABS.findIndex(function (t) { return t.id === 'packing'; });
+pos = pos >= 0 ? pos + 1 : TABS.length;
+baruTab.forEach(function (b) { if (!TABS.some(function (t) { return t.id === b.id; })) { TABS.splice(pos, 0, b); pos++; } });
+
+// 3) loadAll (dengan cadangan kalau created_at tidak ada)
+var loadAllLama = loadAll;
+loadAll = async function () {
+  await loadAllLama();
+  for (var i = 0; i < DATASETS_BARU.length; i++) {
+    var k = DATASETS_BARU[i];
+    try {
+      var r = await sb.from(k).select('data').order('created_at', { ascending: true });
+      if (r.error) r = await sb.from(k).select('data');
+      if (r.error) throw r.error;
+      setArr(k, (r.data || []).map(function (x) { return x.data; }));
+    } catch (e) {
+      console.warn('Tabel baru belum siap / gagal dimuat:', k, e);
     }
-  };
+  }
+};
 
-  // 4) renderAll: tambah 4 tampilan baru
-  renderAll = function () {
-    renderNav();
-    var main = document.getElementById('main');
-    var views = { menu: viewMenu, dashboard: viewDashboard, kode: viewKode, masuk: function () { return viewTransaksi('masuk'); }, keluar: function () { return viewTransaksi('keluar'); },
-      arus: viewArus, opname: viewOpname, produksi: viewProduksi, packing: viewPacking, retur: viewRetur, penjualan: viewPenjualan, laporan: viewLaporan, laporansore: viewLaporanSore,
-      packingtabel: viewPackingTabel, hargaproduk: viewHargaProduk, rasiocv: viewRasioCV, audit: viewAudit };
+// 4) renderAll: DIBUNGKUS (kartu Hutang, Produksi Gabungan, dll tetap jalan)
+var renderAllLama = renderAll;
+renderAll = function () {
+  if (TAB_BARU.indexOf(activeTab) < 0) return renderAllLama.apply(this, arguments);
+  renderNav();
+  var main = document.getElementById('main');
+  var views = { packingtabel: viewPackingTabel, hargaproduk: viewHargaProduk, rasiocv: viewRasioCV, audit: viewAudit };
+  try {
     main.innerHTML = views[activeTab]();
-    if (TAB_BARU.indexOf(activeTab) < 0) attachHandlers(); else attachHandlersBaru();
-  };
+    attachHandlersBaru();
+  } catch (e) {
+    console.error('Gagal menampilkan tab ' + activeTab, e);
+    main.innerHTML = '<div class="card"><h2 style="color:var(--red)">Error pada tab "' + activeTab + '"</h2><div class="note" style="font-size:13px;">Pesan: <b>' + esc(e && e.message || e) + '</b></div></div>';
+  }
+};
 
-  // 5) Stok varian ikut menghitung Packing Harian
-  stokVarianGudang = function (nama) {
-    var dihasilkan = produksi.reduce(function (s, p) { return s + (p.varianHasil || []).filter(function (v) { return v.nama === nama; }).reduce(function (ss, v) { return ss + v.jumlah; }, 0); }, 0);
-    var dikemasLama = packing.reduce(function (s, p) { return s + (p.varian || []).filter(function (v) { return v.nama === nama; }).reduce(function (ss, v) { return ss + v.jumlah; }, 0); }, 0);
-    var k = normKey(nama);
-    var dikemasHarian = (window.packingHarian || []).filter(function (r) { return r.key === k; })
-      .reduce(function (s, r) { return s + Object.keys(r.hari || {}).reduce(function (ss, h) { return ss + (Number(r.hari[h].qty) || 0); }, 0); }, 0);
-    var dikemas = dikemasLama + dikemasHarian;
-    return { dihasilkan: dihasilkan, dikemas: dikemas, sisa: dihasilkan - dikemas };
-  };
+// 5) Stok varian ikut Packing Harian
+stokVarianGudang = function (nama) {
+  var dihasilkan = produksi.reduce(function (s, p) { return s + (p.varianHasil || []).filter(function (v) { return v.nama === nama; }).reduce(function (ss, v) { return ss + v.jumlah; }, 0); }, 0);
+  var dikemasLama = packing.reduce(function (s, p) { return s + (p.varian || []).filter(function (v) { return v.nama === nama; }).reduce(function (ss, v) { return ss + v.jumlah; }, 0); }, 0);
+  var k = normKey(nama);
+  var dikemasHarian = packingHarian.filter(function (r) { return r.key === k; })
+    .reduce(function (s, r) { return s + Object.keys(r.hari || {}).reduce(function (ss, h) { return ss + (Number(r.hari[h].qty) || 0); }, 0); }, 0);
+  var dikemas = dikemasLama + dikemasHarian;
+  return { dihasilkan: dihasilkan, dikemas: dikemas, sisa: dihasilkan - dikemas };
+};
 
-  // 6) Dashboard Internal Control ikut menghitung Packing Harian
-  var icLama = hitungInternalControlSnapshot;
-  hitungInternalControlSnapshot = function (dari, sampai) {
-    var d = icLama(dari, sampai);
-    d.totalPacking = (d.totalPacking || 0) + packingHarianQty(dari, sampai);
-    return d;
-  };
+// 6) Dashboard IC ikut Packing Harian
+var icLama = hitungInternalControlSnapshot;
+hitungInternalControlSnapshot = function (dari, sampai) {
+  var d = icLama(dari, sampai);
+  d.totalPacking = (d.totalPacking || 0) + packingHarianQty(dari, sampai);
+  return d;
+};
 
-  // 7) Realtime untuk 3 tabel baru
-  DATASETS_BARU.forEach(function (k) {
-    sb.channel('sync-' + k).on('postgres_changes', { event: '*', schema: 'public', table: k }, async function () {
-      await loadAll();
-      var tag = document.activeElement ? document.activeElement.tagName : '';
-      if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') renderAll();
-    }).subscribe();
-  });
+// 7) Realtime untuk 3 tabel baru
+DATASETS_BARU.forEach(function (k) {
+  sb.channel('sync-' + k).on('postgres_changes', { event: '*', schema: 'public', table: k }, async function () {
+    await loadAll();
+    var tag = document.activeElement ? document.activeElement.tagName : '';
+    if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') renderAll();
+  }).subscribe();
+});
 
-  // 8) Tombol backup lama: ganti label saja (fungsinya tidak berubah)
-  var bt = document.getElementById('btn-export-excel');
-  if (bt) { bt.textContent = '⬇ Cadangan Data'; bt.title = 'Simpan semua data mentah (untuk Import kembali) — bukan laporan'; }
+// 8) (dihapus: label tombol sudah diatur script Export Audit)
 
-  // 9) Muat ulang data (termasuk tabel baru) lalu tampilkan
-  loadAll().then(function () { updateDbStatusBadge(); renderAll(); });
+// 9) Muat data lalu tampilkan
+loadAll().then(function () { updateDbStatusBadge(); renderAll(); });
+
+  }
 })();
+</script>
