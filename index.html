@@ -6581,3 +6581,781 @@ loadAll().then(function () { updateDbStatusBadge(); renderAll(); });
   if(activeTab==='audit') renderAll();
 })();
 </script>
+<script>
+// =====================================================================
+// PACKING HARIAN v2 — rincian per cabang (Stock/Kasir | Pesanan) + Retur
+// ---------------------------------------------------------------------
+// CARA PASANG: tempel blok <script> ini di PALING BAWAH index.html
+// (setelah blok <script> "LAPORAN AUDIT LENGKAP PER CV"). Jangan hapus kode lama.
+//
+// Yang diganti : HANYA tampilan & cara input tab "Packing Tabel".
+// Yang TIDAK berubah (tetap dibaca menu lain seperti biasa):
+//   - tabel Supabase `packing_harian` (tidak ada tabel baru)
+//   - field lama per tanggal: qty, harga (snapshot), cv, waktu
+//   - Rasio CV, Laporan Audit, stok varian, dashboard IC, export Rasio/Audit
+//
+// Cara data disimpan (satu record per produk per bulan, id "YYYY-MM|kunci-produk"):
+//   hari[tgl] = { qty, harga, cv, waktu,        <- field lama, tetap
+//                 cab: { tuban:{sk,ps}, merakurak:{sk,ps}, jatirogo:{sk,ps} },
+//                 lama: n }                      <- field baru
+//   retur[tgl] = n                              <- field baru (di luar hari[], supaya
+//                                                  laporan lama tidak ikut terpengaruh)
+//   qty = jumlah semua Stock/Kasir + Pesanan semua cabang (+ "lama" bila ada)
+//   Retur TIDAK masuk qty (hanya catatan monitoring).
+//   Data lama yang hanya punya qty (belum dirinci cabang) aman: ditampilkan di kolom
+//   "Lama" dan tetap dihitung di qty sampai Admin memindahkannya ke kolom cabang.
+//
+// Daftar cabang disimpan di tabel `pengaturan_cv` dengan id "cabang_packing"
+// (record terpisah dari target Rasio CV, tidak bercampur dengan data CV).
+// =====================================================================
+(function () {
+  'use strict';
+  try { init(); } catch (e) {
+    console.error('PACKING HARIAN v2 gagal dimuat (tampilan lama tetap dipakai):', e);
+    try {
+      var d = document.createElement('div');
+      d.style.cssText = 'background:#fdecea;color:#b4442e;padding:10px 14px;font:13px sans-serif;border-bottom:2px solid #b4442e;';
+      d.textContent = 'Packing Harian v2 gagal dimuat: ' + (e && e.message ? e.message : e);
+      document.body.insertBefore(d, document.body.firstChild);
+    } catch (x) {}
+  }
+
+  function init() {
+    var T_PK = 'packing_harian', T_HG = 'harga_produk', T_CFG = 'pengaturan_cv', CFG_ID = 'cabang_packing';
+    var NAMA_BULAN = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+    var HARI = ['Min','Sen','Sel','Rab','Kam','Jum','Sab'];
+    var CABANG_DEFAULT = [{ id: 'tuban', nama: 'Tuban' }, { id: 'merakurak', nama: 'Merakurak' }, { id: 'jatirogo', nama: 'Jatirogo' }];
+    var STICKY_W = 34 + 170;     // lebar kolom No + Nama Produk (kolom beku di kiri)
+    var HEAD_H = 28 + 28 + 32;   // tinggi 3 baris header
+    var FOOT_H = 28;
+
+    var now0 = new Date();
+    var S = {
+      bulan: now0.getMonth() + 1, tahun: now0.getFullYear(),
+      recs: {},            // id -> record (lokal; sudah termasuk perubahan yang belum/sedang disimpan)
+      hargaProduk: [], cabangCfg: null,
+      extra: [], cari: '',
+      loadedPer: null, loadedAt: 0, memuatPer: null,
+      lamaHari: {},        // periode -> {tgl:true}  (kolom "Lama" yang perlu tampil)
+      pending: {}, inflight: null, timer: null, saving: false, gagal: 0,
+      view: null, lastSaveAt: 0, lastLoadAt: 0, tSegar: null, autoScrollPer: null
+    };
+
+    // ---------- util ----------
+    function $(id) { return document.getElementById(id); }
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    // HARUS sama persis dengan normKey di modul Packing lama (kunci produk)
+    function normKey(s) { return String(s == null ? '' : s).toLowerCase().replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim(); }
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function bulat(n) { return Math.round((Number(n) || 0) * 10000) / 10000; }
+    function fmt(n) { return (Number(n) || 0).toLocaleString('id-ID', { maximumFractionDigits: 2 }); }
+    function per() { return S.tahun + '-' + pad2(S.bulan); }
+    function hariDalam() { return new Date(S.tahun, S.bulan, 0).getDate(); }
+    function slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
+    function clone(o) { return JSON.parse(JSON.stringify(o)); }
+
+    // ---------- harga & CV (logika sama dengan modul lama) ----------
+    function statusHarga(key) {
+      var list = S.hargaProduk.filter(function (h) { return h.key === key; });
+      if (list.length === 0) return { rec: null, status: 'belum' };
+      var aktif = list.filter(function (h) { return h.aktif; });
+      if (aktif.length === 1) return { rec: aktif[0], status: 'ok' };
+      return { rec: null, status: 'konflik' };
+    }
+    function hargaAktif(key) { return statusHarga(key).rec; }
+    function hargaSel(c, key) {
+      if (c && c.harga != null) return Number(c.harga) || 0;
+      var h = hargaAktif(key);
+      return h ? (Number(h.harga) || 0) : 0;
+    }
+    function cvDariTrx(t) { return t.supplier || t.cv || ''; }
+    function premixDariProduksi(p) { return p.itemId || p.premixId || p.premixItemId || ''; }
+    function cvUntukVarian(nama, tgl) {
+      var prods = produksi.filter(function (p) { return (p.varianHasil || []).some(function (v) { return v.nama === nama; }); });
+      if (prods.length === 0) return '';
+      var sebelum = prods.filter(function (p) { return !tgl || p.tanggal <= tgl; }).sort(function (a, b) { return b.tanggal.localeCompare(a.tanggal); });
+      var p = sebelum[0] || prods.slice().sort(function (a, b) { return a.tanggal.localeCompare(b.tanggal); })[0];
+      var pid = premixDariProduksi(p);
+      if (!pid) return '';
+      var masuk = trx.filter(function (t) { return t.tipe === 'masuk' && t.itemId === pid && cvDariTrx(t); });
+      var sblm = masuk.filter(function (t) { return t.tanggal <= p.tanggal; }).sort(function (a, b) { return b.tanggal.localeCompare(a.tanggal); });
+      var t = sblm[0] || masuk.slice().sort(function (a, b) { return b.tanggal.localeCompare(a.tanggal); })[0];
+      return t ? cvDariTrx(t) : '';
+    }
+
+    // ---------- model data sel ----------
+    function buatRec(id, meta) { return { id: id, periode: meta.periode, key: meta.key, nama: meta.nama, hari: {} }; }
+    function hitungQty(c) {
+      var s = Number(c.lama) || 0;
+      Object.keys(c.cab || {}).forEach(function (b) { s += (Number(c.cab[b].sk) || 0) + (Number(c.cab[b].ps) || 0); });
+      c.qty = bulat(s);
+    }
+    // field: 'retur' | 'lama' | 'cab.<idCabang>.sk' | 'cab.<idCabang>.ps'
+    function setField(rec, d, field, val) {
+      val = bulat(val);
+      if (!(val >= 0)) val = 0;
+      if (field === 'retur') {
+        rec.retur = rec.retur || {};
+        if (val > 0) rec.retur[d] = val; else delete rec.retur[d];
+        return;
+      }
+      rec.hari = rec.hari || {};
+      var c = rec.hari[d];
+      if (!c) {
+        if (!(val > 0)) return;
+        var h = hargaAktif(rec.key);
+        c = rec.hari[d] = { qty: 0, harga: h ? Number(h.harga) : null, cv: cvUntukVarian(rec.nama, rec.periode + '-' + pad2(d)) || '', waktu: new Date().toISOString() };
+      }
+      if (!c.cab) { c.cab = {}; c.lama = Number(c.qty) || 0; }   // data lama: simpan dulu ke "lama", tidak ada yang hilang
+      if (field === 'lama') c.lama = val;
+      else {
+        var p = field.split('.'), bid = p[1], jk = p[2];
+        var b = c.cab[bid] || (c.cab[bid] = { sk: 0, ps: 0 });
+        b[jk] = val;
+        if (!(b.sk > 0) && !(b.ps > 0)) delete c.cab[bid];
+      }
+      hitungQty(c);
+      if (!(c.qty > 0)) { delete rec.hari[d]; return; }
+      var h2 = hargaAktif(rec.key);
+      if (c.harga == null && h2) c.harga = Number(h2.harga);
+      if (!c.cv) c.cv = cvUntukVarian(rec.nama, rec.periode + '-' + pad2(d)) || '';
+    }
+    function setByKey(rec, k, v) { var i = k.indexOf('|'); setField(rec, Number(k.slice(0, i)), k.slice(i + 1), v); }
+    function getVal(rec, col) {
+      if (!rec) return 0;
+      if (col.tipe === 'retur') return Number(rec.retur && rec.retur[col.hari]) || 0;
+      var c = rec.hari && rec.hari[col.hari];
+      if (!c) return 0;
+      if (col.tipe === 'lama') return c.cab ? (Number(c.lama) || 0) : (Number(c.qty) || 0);
+      if (!c.cab) return 0;
+      var b = c.cab[col.cab];
+      return b ? (Number(b[col.tipe]) || 0) : 0;
+    }
+    function colField(col) { return col.tipe === 'retur' ? 'retur' : (col.tipe === 'lama' ? 'lama' : 'cab.' + col.cab + '.' + col.tipe); }
+
+    // ---------- cabang (fleksibel: bisa tambah cabang baru) ----------
+    function daftarCabang() {
+      var l = S.cabangCfg && S.cabangCfg.list && S.cabangCfg.list.length ? S.cabangCfg.list : CABANG_DEFAULT;
+      return l;
+    }
+    function cabangTampil(p) {
+      var dataCab = {};
+      Object.keys(S.recs).forEach(function (id) {
+        var r = S.recs[id]; if (r.periode !== p) return;
+        Object.keys(r.hari || {}).forEach(function (d) { Object.keys((r.hari[d].cab) || {}).forEach(function (b) { dataCab[b] = 1; }); });
+      });
+      var known = {}, out = [];
+      daftarCabang().forEach(function (b) {
+        known[b.id] = 1;
+        if (!b.mulai || b.mulai <= p || dataCab[b.id]) out.push(b);   // cabang baru tidak muncul di bulan sebelum "mulai" (kecuali sudah ada datanya)
+      });
+      Object.keys(dataCab).forEach(function (id) { if (!known[id]) out.push({ id: id, nama: id.charAt(0).toUpperCase() + id.slice(1) }); });
+      return out;
+    }
+
+    // ---------- baca dari Supabase ----------
+    async function muatPeriode(p) {
+      var r = await sb.from(T_PK).select('data').like('id', p + '|%');
+      if (r.error) throw r.error;
+      var m = {};
+      (r.data || []).forEach(function (x) { if (x.data && x.data.id) m[x.data.id] = x.data; });
+      return m;
+    }
+    async function muatHarga() {
+      var out = [], from = 0, size = 1000;
+      for (;;) {
+        var r = await sb.from(T_HG).select('data').order('id', { ascending: true }).range(from, from + size - 1);
+        if (r.error) throw r.error;
+        (r.data || []).forEach(function (x) { if (x.data) out.push(x.data); });
+        if (!r.data || r.data.length < size) break;
+        from += size;
+      }
+      return out;
+    }
+    async function muatCfg() {
+      var r = await sb.from(T_CFG).select('data').eq('id', CFG_ID).maybeSingle();
+      if (r.error) throw r.error;
+      return r.data ? r.data.data : null;
+    }
+    // true bila hasil dipakai (periode masih sama)
+    async function muatSemua() {
+      var p = per();
+      var hasil = await Promise.all([
+        muatPeriode(p),
+        muatHarga().catch(function (e) { console.warn('harga gagal dimuat', e); return S.hargaProduk; }),
+        muatCfg().catch(function (e) { console.warn('cabang gagal dimuat', e); return S.cabangCfg; })
+      ]);
+      if (p !== per()) return false;
+      S.recs = hasil[0]; S.hargaProduk = hasil[1]; S.cabangCfg = hasil[2];
+      S.loadedPer = p; S.loadedAt = Date.now();
+      overlayAll();
+      return true;
+    }
+    // tumpuk perubahan yang belum tersimpan di atas data dari server (supaya tidak "mundur" di layar)
+    function overlayAll(onlyId) {
+      var p = per();
+      [S.inflight, S.pending].forEach(function (src) {
+        if (!src) return;
+        Object.keys(src).forEach(function (id) {
+          if (onlyId && id !== onlyId) return;
+          var sn = src[id]; if (sn.meta.periode !== p) return;
+          var rec = S.recs[id] || (S.recs[id] = buatRec(id, sn.meta));
+          Object.keys(sn.ch).forEach(function (k) { setByKey(rec, k, sn.ch[k]); });
+        });
+      });
+    }
+
+    // ---------- tulis ke Supabase: baca terbaru -> ubah HANYA sel yang diedit -> simpan ----------
+    // Pakai kunci versi (rev): kalau perangkat lain menyimpan di antara baca & tulis,
+    // simpan ditolak lalu diulang dari data terbaru, jadi sel lain tidak pernah tertimpa.
+    async function simpanRec(id, snap) {
+      var meta = snap.meta;
+      for (var i = 0; i < 6; i++) {
+        var g = await sb.from(T_PK).select('data').eq('id', id).maybeSingle();
+        if (g.error) throw g.error;
+        var cur = g.data ? g.data.data : null;
+        var rec = cur ? clone(cur) : buatRec(id, meta);
+        var oldRev = cur ? cur.rev : undefined;
+        Object.keys(snap.ch).forEach(function (k) { setByKey(rec, k, snap.ch[k]); });
+        if (!cur && Object.keys(rec.hari || {}).length === 0 && Object.keys(rec.retur || {}).length === 0) return rec;   // tidak ada yang perlu dibuat
+        rec.rev = (Number(oldRev) || 0) + 1;
+        rec.diubah = new Date().toISOString();
+        if (!cur) {
+          var ins = await sb.from(T_PK).insert({ id: id, data: rec });
+          if (!ins.error) return rec;
+          if (String(ins.error.code) === '23505' || /duplicate/i.test(ins.error.message || '')) continue;
+          throw ins.error;
+        }
+        var q = sb.from(T_PK).update({ data: rec }).eq('id', id);
+        q = (oldRev == null) ? q.is('data->>rev', null) : q.eq('data->>rev', String(oldRev));
+        var up = await q.select('id');
+        if (up.error) {   // filter versi tidak didukung -> simpan biasa (tetap dari data terbaru)
+          var f = await sb.from(T_PK).upsert({ id: id, data: rec }, { onConflict: 'id' });
+          if (f.error) throw f.error;
+          return rec;
+        }
+        if (up.data && up.data.length) return rec;
+        // ada yang menyimpan lebih dulu -> ulangi dari data terbaru
+      }
+      throw new Error('Konflik simpan berulang: ' + id);
+    }
+
+    function jumlahPending() {
+      var n = 0;
+      [S.pending, S.inflight].forEach(function (src) { if (src) Object.keys(src).forEach(function (id) { n += Object.keys(src[id].ch).length; }); });
+      return n;
+    }
+    function tandai(recId, meta, d, field, val) {
+      var p = S.pending[recId] || (S.pending[recId] = { meta: meta, ch: {} });
+      p.ch[d + '|' + field] = val;
+      var rec = S.recs[recId] || (S.recs[recId] = buatRec(recId, meta));
+      setField(rec, d, field, val);
+      jadwalSimpan(600);
+      setStatus();
+    }
+    function jadwalSimpan(ms) { clearTimeout(S.timer); S.timer = setTimeout(flush, ms); }
+
+    async function flush() {
+      clearTimeout(S.timer);
+      if (S.saving) { jadwalSimpan(400); return; }
+      var ids = Object.keys(S.pending);
+      if (!ids.length) { setStatus(); return; }
+      S.saving = true; S.inflight = S.pending; S.pending = {};
+      setStatus();
+      var gagal = {}, snapAll = S.inflight;
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i], snap = snapAll[id];
+        try {
+          var saved = await simpanRec(id, snap);
+          S.recs[id] = saved;
+          if (S.view && snap.meta.periode !== per()) delete S.recs[id];
+          overlayAll(id);   // tumpuk edit yang masuk selagi menyimpan
+        } catch (e) { console.error('Gagal simpan packing', id, e); gagal[id] = snap; }
+      }
+      S.inflight = null; S.saving = false;
+      var nGagal = Object.keys(gagal).length;
+      Object.keys(gagal).forEach(function (id) {   // kembalikan yang gagal, tanpa menimpa edit yang lebih baru
+        var sn = gagal[id], p = S.pending[id] || (S.pending[id] = { meta: sn.meta, ch: {} });
+        Object.keys(sn.ch).forEach(function (k) { if (!(k in p.ch)) p.ch[k] = sn.ch[k]; });
+      });
+      if (nGagal) { S.gagal++; jadwalSimpan(Math.min(30000, 2000 * Math.pow(2, S.gagal - 1))); }
+      else { S.gagal = 0; S.lastSaveAt = Date.now(); if (Object.keys(S.pending).length) jadwalSimpan(300); else segarkanModulLama(); }
+      setStatus(); bersihkanDirty(); refreshTotals();
+    }
+    // modul lain (Rasio CV, Audit, stok) membaca data dari loadAll(); segarkan setelah simpan
+    function segarkanModulLama() {
+      clearTimeout(S.tSegar);
+      S.tSegar = setTimeout(function () {
+        if (jumlahPending() || S.saving) { segarkanModulLama(); return; }
+        if (S.lastLoadAt > S.lastSaveAt) return;   // sudah dimuat ulang (mis. oleh realtime) sesudah simpan terakhir
+        try { var pr = loadAll(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
+      }, 2500);
+    }
+
+    // ---------- status ----------
+    function setStatus() {
+      var el = $('ph-status'); if (!el) return;
+      var n = jumlahPending();
+      if (S.gagal && n) { el.textContent = '⚠ ' + n + ' perubahan belum tersimpan — mencoba lagi otomatis (cek koneksi)'; el.className = 'ph-st-err'; }
+      else if (S.saving || n) { el.textContent = '⏳ Menyimpan ' + n + ' perubahan…'; el.className = 'ph-st-warn'; }
+      else { el.textContent = '✓ Semua perubahan tersimpan otomatis'; el.className = 'ph-st-ok'; }
+    }
+    function sedangPending(recId, d, field) {
+      var k = d + '|' + field;
+      return !!((S.pending[recId] && (k in S.pending[recId].ch)) || (S.inflight && S.inflight[recId] && (k in S.inflight[recId].ch)));
+    }
+    function bersihkanDirty() {
+      var V = S.view; if (!V) return;
+      var tbl = $('ph-table'); if (!tbl) return;
+      tbl.querySelectorAll('input.ph-dirty').forEach(function (el) {
+        var tr = el.closest('tr'), row = V.rows[tr.dataset.i], col = V.cols[el.dataset.c];
+        if (!row || !col) return;
+        if (!sedangPending(row.recId, col.hari, colField(col))) el.classList.remove('ph-dirty');
+      });
+    }
+
+    // ---------- baris produk ----------
+    function barisProduk(p) {
+      var m = {};
+      semuaVarianNama().forEach(function (n) { m[normKey(n)] = { key: normKey(n), nama: n }; });
+      S.extra.forEach(function (n) { var k = normKey(n); if (!m[k]) m[k] = { key: k, nama: n }; });
+      Object.keys(S.recs).forEach(function (id) { var r = S.recs[id]; if (r.periode === p && !m[r.key]) m[r.key] = { key: r.key, nama: r.nama }; });
+      return Object.keys(m).map(function (k) { return m[k]; }).sort(function (a, b) { return a.nama.localeCompare(b.nama); });
+    }
+    function cvTersimpan(rec) {
+      var s = [];
+      Object.keys((rec && rec.hari) || {}).forEach(function (h) { var cv = rec.hari[h].cv; if (cv && s.indexOf(cv) < 0) s.push(cv); });
+      return s;
+    }
+
+    // ---------- tampilan ----------
+    function viewHtml() {
+      var p = per(), nHari = hariDalam(), thn = new Date().getFullYear(), hariIni = new Date();
+      var cabs = cabangTampil(p);
+      var lh = S.lamaHari[p] || (S.lamaHari[p] = {});
+      Object.keys(S.recs).forEach(function (id) {
+        var r = S.recs[id]; if (r.periode !== p) return;
+        Object.keys(r.hari || {}).forEach(function (d) { var c = r.hari[d]; if ((Number(c.qty) || 0) > 0 && (!c.cab || (Number(c.lama) || 0) > 0)) lh[d] = true; });
+      });
+      var cols = [], colCls = [];
+      for (var d = 1; d <= nHari; d++) {
+        var dow = new Date(S.tahun, S.bulan - 1, d).getDay(), first = true;
+        var add = function (o, extra) {
+          cols.push(o);
+          colCls.push((first ? 'ph-ds ' : '') + (dow === 0 ? 'ph-sun ' : '') + (extra || ''));
+          first = false;
+        };
+        cabs.forEach(function (b) { add({ hari: d, tipe: 'sk', cab: b.id }); add({ hari: d, tipe: 'ps', cab: b.id }); });
+        add({ hari: d, tipe: 'retur' }, 'ph-ret');
+        if (lh[d]) add({ hari: d, tipe: 'lama' }, 'ph-lama');
+      }
+      var rowsList = barisProduk(p);
+      var rows = rowsList.map(function (b) { return { key: b.key, nama: b.nama, recId: p + '|' + b.key, meta: { periode: p, key: b.key, nama: b.nama } }; });
+
+      // header 3 tingkat
+      var h1 = '<th rowspan="3" class="ph-s1 ph-hl">No</th><th rowspan="3" class="ph-s2 ph-hl">Nama Produk</th><th rowspan="3" class="ph-r1 ph-hl">CV Sumber</th><th rowspan="3" class="ph-r1 ph-hl">Harga</th>';
+      var h2 = '', h3 = '';
+      for (var d2 = 1; d2 <= nHari; d2++) {
+        var dw = new Date(S.tahun, S.bulan - 1, d2).getDay();
+        var adaLama = !!lh[d2], nC = cabs.length * 2 + 1 + (adaLama ? 1 : 0);
+        var isToday = (S.tahun === hariIni.getFullYear() && S.bulan === hariIni.getMonth() + 1 && d2 === hariIni.getDate());
+        h1 += '<th colspan="' + nC + '" class="ph-r1 ph-hd' + (dw === 0 ? ' ph-sunh' : '') + (isToday ? ' ph-today' : '') + '" data-d="' + d2 + '">Tgl ' + d2 + ' <span class="ph-dn">' + HARI[dw] + '</span> <span class="ph-dt" data-d="' + d2 + '"></span></th>';
+        cabs.forEach(function (b, bi) {
+          h2 += '<th colspan="2" class="ph-r2 ph-bh' + (bi === 0 ? ' ph-ds' : '') + '">' + esc(b.nama) + '</th>';
+          h3 += '<th class="ph-r3' + (bi === 0 ? ' ph-ds' : '') + '">Stock/ Kasir</th><th class="ph-r3">Pesanan</th>';
+        });
+        h2 += '<th rowspan="2" class="ph-r2 ph-reth' + (cabs.length === 0 ? ' ph-ds' : '') + '">Retur</th>';
+        if (adaLama) h2 += '<th rowspan="2" class="ph-r2 ph-lamah" title="Data lama yang belum dirinci per cabang. Pindahkan ke kolom cabang, lalu kosongkan.">Lama</th>';
+      }
+      h1 += '<th rowspan="3" class="ph-r1 ph-hl">Total Qty</th><th rowspan="3" class="ph-r1 ph-hl">Total Retur</th><th rowspan="3" class="ph-r1 ph-hl">Total Nilai</th>';
+
+      // badan tabel
+      var body = rows.map(function (row, i) {
+        var rec = S.recs[row.recId], hg = statusHarga(row.key);
+        var hargaTxt = hg.rec ? 'Rp' + Math.round(hg.rec.harga).toLocaleString('id-ID') : (hg.status === 'konflik' ? '<span class="ph-warn">⚠ pilih harga</span>' : '<span class="ph-warn">⚠ belum ada</span>');
+        var cvs = cvTersimpan(rec);
+        var cvTxt = cvs.length ? esc(cvs.join(', ')) : (esc(cvUntukVarian(row.nama, p + '-' + pad2(nHari))) || '<span class="ph-warn">?</span>');
+        var cells = '';
+        for (var ci = 0; ci < cols.length; ci++) {
+          var v = getVal(rec, cols[ci]);
+          var key = cols[ci].hari + '|' + colField(cols[ci]);
+          cells += '<td class="' + colCls[ci] + '"><input class="ph-c' + (sedangPending(row.recId, cols[ci].hari, colField(cols[ci])) ? ' ph-dirty' : '') + '" inputmode="decimal" autocomplete="off" data-c="' + ci + '" data-v="' + (v ? v : '') + '" value="' + (v ? v : '') + '"></td>';
+        }
+        return '<tr data-i="' + i + '" data-cari="' + esc(row.nama.toLowerCase()) + '"><td class="ph-s1">' + (i + 1) + '</td><td class="ph-s2" title="' + esc(row.nama) + '">' + esc(row.nama) + '</td><td class="ph-cv">' + cvTxt + '</td><td class="ph-num">' + hargaTxt + '</td>' + cells +
+          '<td class="ph-num ph-tq">0</td><td class="ph-num ph-tr">0</td><td class="ph-num ph-tn">Rp0</td></tr>';
+      }).join('');
+
+      var foot = '<tr><td class="ph-s1 ph-fl"></td><td class="ph-s2 ph-fl">TOTAL</td><td class="ph-fl"></td><td class="ph-fl"></td>';
+      for (var fc = 0; fc < cols.length; fc++) foot += '<td class="ph-fl ph-fc ' + colCls[fc] + '" data-c="' + fc + '"></td>';
+      foot += '<td class="ph-fl ph-num" id="ph-gq">0</td><td class="ph-fl ph-num" id="ph-gr">0</td><td class="ph-fl ph-num" id="ph-gn">Rp0</td></tr>';
+
+      var bulanOpt = NAMA_BULAN.map(function (n, i) { return '<option value="' + (i + 1) + '"' + (i + 1 === S.bulan ? ' selected' : '') + '>' + n + '</option>'; }).join('');
+      var tahunOpt = ''; for (var y = thn - 2; y <= thn + 1; y++) tahunOpt += '<option value="' + y + '"' + (y === S.tahun ? ' selected' : '') + '>' + y + '</option>';
+      var tglOpt = '<option value="">Lompat ke tanggal…</option>'; for (var t = 1; t <= nHari; t++) tglOpt += '<option value="' + t + '">Tanggal ' + t + '</option>';
+      var namaUnik = {}; S.hargaProduk.forEach(function (h) { namaUnik[h.nama] = 1; }); semuaVarianNama().forEach(function (n) { namaUnik[n] = 1; });
+      var dl = Object.keys(namaUnik).sort().map(function (n) { return '<option value="' + esc(n) + '"></option>'; }).join('');
+
+      var sigRows = rows.map(function (r) { return r.key; }).join(',');
+      S.view = { per: p, nHari: nHari, cabs: cabs, cols: cols, rows: rows, sig: cabs.map(function (b) { return b.id; }).join(',') + '#' + Object.keys(lh).join(',') + '#' + sigRows };
+
+      return '<div class="card">' +
+        '<h2>Packing Harian — rincian per cabang</h2>' +
+        '<div class="sub">Isi angka langsung di sel (seperti Excel). Setiap tanggal: <b>Stock/Kasir</b> dan <b>Pesanan</b> per cabang, plus <b>Retur</b>. Tersimpan otomatis per sel. Enter / ↑ ↓ pindah baris, Tab / ← → pindah kolom, bisa tempel (Ctrl+V) dari Excel.</div>' +
+        '<form class="inline" onsubmit="return false;">' +
+        '<div class="field"><label>Bulan</label><select id="ph-bulan">' + bulanOpt + '</select></div>' +
+        '<div class="field"><label>Tahun</label><select id="ph-tahun">' + tahunOpt + '</select></div>' +
+        '<div class="field"><label>Cari produk</label><input id="ph-cari" placeholder="ketik nama..." value="' + esc(S.cari) + '"></div>' +
+        '<div class="field"><label>Lompat</label><select id="ph-jump">' + tglOpt + '</select></div>' +
+        '<div class="field"><label>Tambah baris produk</label><input id="ph-add-nama" list="ph-dl" placeholder="ketik / pilih"><datalist id="ph-dl">' + dl + '</datalist></div>' +
+        '<button type="button" class="btn-sekunder" id="ph-add-btn">+ Baris</button>' +
+        '<button type="button" class="btn-sekunder" id="ph-add-cab">+ Cabang baru</button>' +
+        '</form>' +
+        '<div style="margin:10px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;">' +
+        '<span id="ph-status" class="ph-st-ok">✓ Semua perubahan tersimpan otomatis</span>' +
+        '<button type="button" class="btn-sekunder" id="ph-export" style="margin-left:auto;">⬇ Export Excel (.xlsx)</button>' +
+        '</div>' +
+        '<div class="ph-wrap" id="ph-wrap"><table id="ph-table"><thead>' +
+        '<tr class="ph-t1">' + h1 + '</tr><tr class="ph-t2">' + h2 + '</tr><tr class="ph-t3">' + h3 + '</tr></thead><tbody>' +
+        (body || '<tr><td colspan="' + (cols.length + 7) + '" class="empty">Belum ada varian roti — catat dulu di tab Produksi, atau tambahkan baris produk di atas</td></tr>') +
+        '</tbody><tfoot>' + foot + '</tfoot></table></div>' +
+        '<div class="note"><b>Total Qty</b> = semua Stock/Kasir + Pesanan dari seluruh cabang. Angka ini yang dipakai Rasio CV, laporan, dan stok (berdasarkan CV Sumber produk, bukan cabang). ' +
+        '<b>Retur</b> hanya catatan monitoring dan tidak mengurangi Total Qty. <b>NILAI POTENSI</b> = Qty × harga saat packing dicatat (bukan uang masuk).' +
+        (Object.keys(lh).length ? ' Kolom <b>Lama</b> berisi data lama yang belum dirinci per cabang — pindahkan ke kolom cabang lalu kosongkan.' : '') + '</div>' +
+        '</div>';
+    }
+
+    // ---------- hitung ulang total (dari data, bukan dari DOM) ----------
+    function refreshTotals() {
+      var V = S.view, tbl = $('ph-table'); if (!V || !tbl || V.per !== per()) return;
+      var colSum = new Array(V.cols.length).fill(0), gq = 0, gr = 0, gn = 0, daySum = {};
+      var trs = tbl.tBodies[0].rows;
+      V.rows.forEach(function (row, i) {
+        var rec = S.recs[row.recId], tq = 0, tr = 0, tn = 0;
+        if (rec) {
+          Object.keys(rec.hari || {}).forEach(function (d) { var c = rec.hari[d], q = Number(c.qty) || 0; tq += q; tn += q * hargaSel(c, rec.key); });
+          Object.keys(rec.retur || {}).forEach(function (d) { tr += Number(rec.retur[d]) || 0; });
+        }
+        for (var ci = 0; ci < V.cols.length; ci++) colSum[ci] += getVal(rec, V.cols[ci]);
+        var el = trs[i]; if (!el || !el.querySelector) return;
+        el.querySelector('.ph-tq').textContent = fmt(tq);
+        el.querySelector('.ph-tr').textContent = fmt(tr);
+        el.querySelector('.ph-tn').textContent = 'Rp' + Math.round(tn).toLocaleString('id-ID');
+        gq += tq; gr += tr; gn += tn;
+      });
+      tbl.querySelectorAll('tfoot .ph-fc').forEach(function (td) {
+        var ci = Number(td.dataset.c), v = colSum[ci];
+        td.textContent = v ? fmt(v) : '';
+        if (V.cols[ci].tipe !== 'retur') daySum[V.cols[ci].hari] = (daySum[V.cols[ci].hari] || 0) + v;
+      });
+      tbl.querySelectorAll('.ph-dt').forEach(function (sp) { var v = daySum[sp.dataset.d]; sp.textContent = v ? '· ' + fmt(v) : ''; });
+      var a = $('ph-gq'), b = $('ph-gr'), c2 = $('ph-gn');
+      if (a) a.textContent = fmt(gq); if (b) b.textContent = fmt(gr); if (c2) c2.textContent = 'Rp' + Math.round(gn).toLocaleString('id-ID');
+    }
+    // perbarui isi sel dari data terbaru tanpa menggambar ulang (sel yang sedang diketik / belum tersimpan dilewati)
+    function patchGrid() {
+      var V = S.view, tbl = $('ph-table'); if (!V || !tbl || V.per !== per()) return;
+      var fokus = document.activeElement;
+      tbl.querySelectorAll('input.ph-c').forEach(function (el) {
+        if (el === fokus || el.classList.contains('ph-dirty')) return;
+        var tr = el.closest('tr'), row = V.rows[tr.dataset.i], col = V.cols[el.dataset.c];
+        var v = getVal(S.recs[row.recId], col), s = v ? String(v) : '';
+        if (el.value !== s) { el.value = s; el.dataset.v = s; }
+      });
+      refreshTotals();
+    }
+    function sedangMengetik() { var t = document.activeElement; return !!(t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')); }
+    function sigSekarang() {
+      var p = per(), lh = S.lamaHari[p] || {};
+      var l2 = {}; Object.keys(lh).forEach(function (k) { l2[k] = 1; });
+      Object.keys(S.recs).forEach(function (id) {
+        var r = S.recs[id]; if (r.periode !== p) return;
+        Object.keys(r.hari || {}).forEach(function (d) { var c = r.hari[d]; if ((Number(c.qty) || 0) > 0 && (!c.cab || (Number(c.lama) || 0) > 0)) l2[d] = 1; });
+      });
+      return cabangTampil(p).map(function (b) { return b.id; }).join(',') + '#' + Object.keys(l2).join(',') + '#' + barisProduk(p).map(function (r) { return r.key; }).join(',');
+    }
+    function segarkanTampilan() {   // dipanggil setelah data dimuat ulang di latar belakang
+      if (activeTab !== 'packingtabel' || !S.view) return;
+      if (S.view.per !== per()) return;
+      if (sigSekarang() !== S.view.sig) { if (!sedangMengetik()) renderAll(); } else patchGrid();
+    }
+
+    // ---------- interaksi ----------
+    function terapkanInput(el) {
+      var V = S.view, tr = el.closest('tr'); if (!V || !tr) return false;
+      var row = V.rows[tr.dataset.i], col = V.cols[el.dataset.c]; if (!row || !col) return false;
+      var raw = String(el.value).replace(',', '.').trim();
+      if (raw !== '' && !/^\d*\.?\d*$/.test(raw)) { el.value = el.dataset.v || ''; return false; }   // tolak huruf/minus
+      var val = raw === '' || raw === '.' ? 0 : parseFloat(raw);
+      el.dataset.v = el.value;
+      tandai(row.recId, row.meta, col.hari, colField(col), val);
+      el.classList.add('ph-dirty');
+      refreshSoon();
+      return true;
+    }
+    var rafT = null;
+    function refreshSoon() { if (rafT) return; rafT = requestAnimationFrame(function () { rafT = null; refreshTotals(); }); }
+    function pastikanTerlihat(el) {
+      var wrap = $('ph-wrap'); if (!wrap) return;
+      var wr = wrap.getBoundingClientRect(), er = el.getBoundingClientRect();
+      if (er.left < wr.left + STICKY_W) wrap.scrollLeft -= (wr.left + STICKY_W - er.left + 8);
+      else if (er.right > wr.right) wrap.scrollLeft += (er.right - wr.right + 8);
+      if (er.top < wr.top + HEAD_H) wrap.scrollTop -= (wr.top + HEAD_H - er.top + 4);
+      else if (er.bottom > wr.bottom - FOOT_H) wrap.scrollTop += (er.bottom - wr.bottom + FOOT_H + 4);
+    }
+    function fokusKe(el) { if (!el) return; el.focus({ preventScroll: true }); el.select(); pastikanTerlihat(el); }
+    function visibleSibling(tr, dir) {
+      var n = dir > 0 ? tr.nextElementSibling : tr.previousElementSibling;
+      while (n && n.style.display === 'none') n = dir > 0 ? n.nextElementSibling : n.previousElementSibling;
+      return n && n.dataset && n.dataset.i != null ? n : null;
+    }
+    function pasang() {
+      var tbl = $('ph-table'), wrap = $('ph-wrap');
+      $('ph-bulan').onchange = function () { S.bulan = Number(this.value); S.loadedPer = null; renderAll(); };
+      $('ph-tahun').onchange = function () { S.tahun = Number(this.value); S.loadedPer = null; renderAll(); };
+      var filter = function () {
+        var q = ($('ph-cari').value || '').toLowerCase().trim(); S.cari = $('ph-cari').value;
+        tbl.querySelectorAll('tbody tr[data-i]').forEach(function (tr) { tr.style.display = (!q || tr.dataset.cari.indexOf(q) >= 0) ? '' : 'none'; });
+      };
+      $('ph-cari').oninput = filter; filter();
+      $('ph-jump').onchange = function () {
+        var d = this.value; if (!d) return;
+        var th = tbl.querySelector('thead th.ph-hd[data-d="' + d + '"]');
+        if (th) wrap.scrollLeft = th.offsetLeft - STICKY_W - 4;
+        this.value = '';
+      };
+      $('ph-add-btn').onclick = function () {
+        var n = $('ph-add-nama').value.trim(); if (!n) return;
+        if (S.extra.indexOf(n) < 0) S.extra.push(n);
+        renderAll();
+      };
+      $('ph-add-cab').onclick = async function () {
+        var nama = prompt('Nama cabang baru (mis. Palang):'); if (!nama || !nama.trim()) return;
+        try { var ok = await tambahCabang(nama.trim()); if (ok) renderAll(); }
+        catch (e) { console.error(e); alert('Gagal menambah cabang: ' + (e.message || e)); }
+      };
+      $('ph-export').onclick = exportExcel;
+
+      tbl.addEventListener('input', function (e) { if (e.target.classList.contains('ph-c')) terapkanInput(e.target); });
+      tbl.addEventListener('focusin', function (e) { if (e.target.classList.contains('ph-c')) { e.target.select(); pastikanTerlihat(e.target); } });
+      tbl.addEventListener('focusout', function (e) { if (e.target.classList.contains('ph-c') && Object.keys(S.pending).length) jadwalSimpan(150); });
+      tbl.addEventListener('keydown', function (e) {
+        var el = e.target; if (!el.classList.contains('ph-c')) return;
+        var tr = el.closest('tr'), c = Number(el.dataset.c), nx = null;
+        if (e.key === 'Enter' || e.key === 'ArrowDown') { var n1 = visibleSibling(tr, e.shiftKey && e.key === 'Enter' ? -1 : 1); nx = n1 && n1.querySelector('.ph-c[data-c="' + c + '"]'); }
+        else if (e.key === 'ArrowUp') { var n2 = visibleSibling(tr, -1); nx = n2 && n2.querySelector('.ph-c[data-c="' + c + '"]'); }
+        else if (e.key === 'ArrowRight' && el.selectionEnd === el.value.length) nx = tr.querySelector('.ph-c[data-c="' + (c + 1) + '"]');
+        else if (e.key === 'ArrowLeft' && el.selectionStart === 0) nx = tr.querySelector('.ph-c[data-c="' + (c - 1) + '"]');
+        else return;
+        e.preventDefault();
+        if (nx) fokusKe(nx);
+      });
+      tbl.addEventListener('paste', function (e) {   // tempel blok dari Excel
+        var el = e.target; if (!el.classList.contains('ph-c')) return;
+        var txt = (e.clipboardData || window.clipboardData).getData('text') || '';
+        if (!/[\t\n]/.test(txt.replace(/[\r\n]+$/, ''))) return;   // satu nilai: biarkan paste biasa
+        e.preventDefault();
+        var grid = txt.replace(/\r/g, '').replace(/\n+$/, '').split('\n').map(function (r) { return r.split('\t'); });
+        var tr = el.closest('tr'), c0 = Number(el.dataset.c);
+        for (var i = 0; i < grid.length && tr; i++) {
+          for (var j = 0; j < grid[i].length; j++) {
+            var cell = tr.querySelector('.ph-c[data-c="' + (c0 + j) + '"]'); if (!cell) continue;
+            cell.value = String(grid[i][j]).replace(/[^\d.,]/g, '');
+            terapkanInput(cell);
+          }
+          tr = visibleSibling(tr, 1);
+        }
+      });
+      refreshTotals(); setStatus();
+      // otomatis geser ke tanggal hari ini (sekali per bulan yang dibuka)
+      var hi = new Date();
+      if (S.autoScrollPer !== per() && S.tahun === hi.getFullYear() && S.bulan === hi.getMonth() + 1) {
+        S.autoScrollPer = per();
+        var th = tbl.querySelector('thead th.ph-hd[data-d="' + hi.getDate() + '"]');
+        if (th) wrap.scrollLeft = Math.max(0, th.offsetLeft - STICKY_W - 4);
+      }
+    }
+
+    // ---------- cabang baru ----------
+    async function tambahCabang(nama) {
+      var id = slug(nama);
+      if (!id) { alert('Nama cabang tidak valid.'); return false; }
+      var latest = await muatCfg();
+      var list = latest && latest.list && latest.list.length ? clone(latest.list) : clone(CABANG_DEFAULT);
+      if (list.some(function (b) { return b.id === id || b.nama.toLowerCase() === nama.toLowerCase(); })) { alert('Cabang "' + nama + '" sudah ada.'); return false; }
+      list.push({ id: id, nama: nama, mulai: per() });   // tampil mulai bulan ini; bulan lama tidak berubah
+      var rec = Object.assign({}, latest || {}, { id: CFG_ID, list: list, diubah: new Date().toISOString() });
+      var r = await sb.from(T_CFG).upsert({ id: CFG_ID, data: rec }, { onConflict: 'id' });
+      if (r.error) throw r.error;
+      S.cabangCfg = rec;
+      return true;
+    }
+
+    // ---------- export Excel ----------
+    function exportExcel() {
+      var V = S.view; if (!V) return;
+      if (typeof XLSX === 'undefined') { alert('Library Excel belum termuat.'); return; }
+      var p = V.per, nHari = V.nHari, cabs = V.cabs, lh = S.lamaHari[p] || {};
+      var data = V.rows.filter(function (row) {
+        var rec = S.recs[row.recId]; return rec && (Object.keys(rec.hari || {}).length || Object.keys(rec.retur || {}).length);
+      });
+      if (!data.length) { alert('Belum ada data packing pada bulan ini.'); return; }
+      var H0 = ['No', 'Nama Produk', 'CV Sumber', 'Harga'], H1 = ['', '', '', ''], H2 = ['', '', '', ''], merges = [], c = 4;
+      var kolom = [];   // {hari,tipe,cab}
+      for (var d = 1; d <= nHari; d++) {
+        var start = c;
+        cabs.forEach(function (b) {
+          H0.push(c === start ? 'Tanggal ' + d : ''); H1.push(b.nama); H2.push('Stock/Kasir');
+          kolom.push({ hari: d, tipe: 'sk', cab: b.id }); c++;
+          H0.push(''); H1.push(''); H2.push('Pesanan'); kolom.push({ hari: d, tipe: 'ps', cab: b.id }); c++;
+          merges.push({ s: { r: 1, c: c - 2 }, e: { r: 1, c: c - 1 } });
+        });
+        H0.push(c === start ? 'Tanggal ' + d : ''); H1.push('Retur'); H2.push(''); kolom.push({ hari: d, tipe: 'retur' });
+        merges.push({ s: { r: 1, c: c }, e: { r: 2, c: c } }); c++;
+        if (lh[d]) { H0.push(''); H1.push('Lama'); H2.push(''); kolom.push({ hari: d, tipe: 'lama' }); merges.push({ s: { r: 1, c: c }, e: { r: 2, c: c } }); c++; }
+        merges.push({ s: { r: 0, c: start }, e: { r: 0, c: c - 1 } });
+      }
+      var cQ = c, cR = c + 1, cN = c + 2;
+      H0.push('Total Qty', 'Total Retur', 'Total Nilai'); H1.push('', '', ''); H2.push('', '', '');
+      [0, 1, 2, 3, cQ, cR, cN].forEach(function (cc) { merges.push({ s: { r: 0, c: cc }, e: { r: 2, c: cc } }); });
+      var aoa = [H0, H1, H2], no = 0;
+      data.forEach(function (row, idx) {
+        var rec = S.recs[row.recId], hg = hargaAktif(row.key), r = [++no, row.nama, cvTersimpan(rec).join(', '), hg ? Number(hg.harga) : ''], tq = 0, tr = 0, tn = 0;
+        kolom.forEach(function (k) { var v = getVal(rec, k); r.push(v || ''); });
+        Object.keys(rec.hari || {}).forEach(function (d) { var cc = rec.hari[d], q = Number(cc.qty) || 0; tq += q; tn += q * hargaSel(cc, rec.key); });
+        Object.keys(rec.retur || {}).forEach(function (d) { tr += Number(rec.retur[d]) || 0; });
+        r.push(tq, tr, tn); aoa.push(r);
+      });
+      var ws = XLSX.utils.aoa_to_sheet(aoa);
+      var first = 4, last = aoa.length;   // baris data: 4..last (1-based)
+      var tot = ['', 'TOTAL', '', ''];
+      for (var cc2 = 4; cc2 <= cN; cc2++) tot.push('');
+      XLSX.utils.sheet_add_aoa(ws, [tot], { origin: { r: last, c: 0 } });
+      for (var c3 = 4; c3 <= cN; c3++) {
+        var col = XLSX.utils.encode_col(c3), rr = XLSX.utils.encode_cell({ r: last, c: c3 });
+        var sum = 0; for (var q = first - 1; q < last; q++) sum += Number(aoa[q][c3]) || 0;
+        ws[rr] = { t: 'n', v: sum, f: 'SUM(' + col + first + ':' + col + last + ')', z: c3 === cN ? '#,##0' : 'General' };
+      }
+      ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: last, c: cN } });
+      ws['!merges'] = merges;
+      var cw = [{ wch: 5 }, { wch: 30 }, { wch: 14 }, { wch: 9 }]; for (var k2 = 4; k2 < cN; k2++) cw.push({ wch: 9 }); cw.push({ wch: 10 }, { wch: 10 }, { wch: 14 });
+      ws['!cols'] = cw;
+
+      // sheet 2: rekap per cabang untuk monitoring distribusi
+      var h = ['Nama Produk', 'CV Sumber'];
+      cabs.forEach(function (b) { h.push(b.nama + ' - Stock/Kasir', b.nama + ' - Pesanan'); });
+      h.push('Belum dirinci', 'Total Qty', 'Total Retur');
+      var rows2 = data.map(function (row) {
+        var rec = S.recs[row.recId], r = [row.nama, cvTersimpan(rec).join(', ')], tq = 0, tr = 0, lama = 0;
+        cabs.forEach(function (b) {
+          var sk = 0, ps = 0;
+          Object.keys(rec.hari || {}).forEach(function (d) { var cb = rec.hari[d].cab && rec.hari[d].cab[b.id]; if (cb) { sk += Number(cb.sk) || 0; ps += Number(cb.ps) || 0; } });
+          r.push(sk || '', ps || '');
+        });
+        Object.keys(rec.hari || {}).forEach(function (d) { var cc = rec.hari[d]; tq += Number(cc.qty) || 0; lama += cc.cab ? (Number(cc.lama) || 0) : (Number(cc.qty) || 0); });
+        Object.keys(rec.retur || {}).forEach(function (d) { tr += Number(rec.retur[d]) || 0; });
+        r.push(lama || '', tq, tr); return r;
+      });
+      var ws2 = XLSX.utils.aoa_to_sheet([h].concat(rows2));
+      var n2 = rows2.length, tot2 = ['TOTAL', ''];
+      for (var j = 2; j < h.length; j++) tot2.push('');
+      XLSX.utils.sheet_add_aoa(ws2, [tot2], { origin: { r: n2 + 1, c: 0 } });
+      for (var j2 = 2; j2 < h.length; j2++) {
+        var colL = XLSX.utils.encode_col(j2), s2 = 0;
+        rows2.forEach(function (r) { s2 += Number(r[j2]) || 0; });
+        ws2[XLSX.utils.encode_cell({ r: n2 + 1, c: j2 })] = { t: 'n', v: s2, f: 'SUM(' + colL + '2:' + colL + (n2 + 1) + ')' };
+      }
+      ws2['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: n2 + 1, c: h.length - 1 } });
+      ws2['!cols'] = h.map(function (x, i) { return { wch: i === 0 ? 30 : Math.max(12, String(x).length + 2) }; });
+
+      var wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, ('Packing ' + p).slice(0, 31));
+      XLSX.utils.book_append_sheet(wb, ws2, 'Rekap per Cabang');
+      XLSX.writeFile(wb, 'packing-harian-' + p + '.xlsx');
+    }
+
+    // ---------- CSS ----------
+    var css = '' +
+      '.ph-wrap{overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:8px;background:var(--white);position:relative}\n' +
+      '#ph-table{border-collapse:separate;border-spacing:0;font-size:12px;margin:0;width:max-content!important;min-width:0}\n' +
+      '#ph-table th,#ph-table td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:0 4px;white-space:nowrap;box-sizing:border-box;text-align:center;background:var(--white)}\n' +
+      '#ph-table thead th{position:sticky;background:var(--cream);color:var(--brown);font-weight:700;font-size:11px;line-height:1.15;z-index:3}\n' +
+      '#ph-table .ph-r1{top:0;height:28px}\n#ph-table .ph-r2{top:28px;height:28px}\n#ph-table .ph-r3{top:56px;height:32px;white-space:normal;min-width:54px;width:54px;font-size:10px}\n' +
+      '#ph-table .ph-s1{position:sticky;left:0;z-index:2;min-width:34px;width:34px;max-width:34px}\n' +
+      '#ph-table .ph-s2{position:sticky;left:34px;z-index:2;min-width:170px;width:170px;max-width:170px;overflow:hidden;text-overflow:ellipsis;text-align:left;border-right:2px solid var(--line)}\n' +
+      '#ph-table thead .ph-s1,#ph-table thead .ph-s2{z-index:5;top:0}\n' +
+      '#ph-table .ph-hl{top:0}\n' +
+      '#ph-table .ph-hd{background:var(--wheat)}\n#ph-table .ph-sunh{background:rgb(240,205,195)}\n#ph-table .ph-today{outline:2px solid var(--amber);outline-offset:-2px}\n' +
+      '#ph-table .ph-dn{font-weight:400;font-size:10px}\n#ph-table .ph-dt{font-weight:400;font-size:10px;color:var(--brown-soft)}\n' +
+      '#ph-table .ph-bh{background:var(--wheat)}\n#ph-table .ph-reth{background:rgb(250,226,214)}\n#ph-table .ph-lamah{background:rgb(235,235,235)}\n' +
+      '#ph-table .ph-ds{border-left:2px solid var(--brown-soft)}\n' +
+      '#ph-table td.ph-sun{background:rgb(250,235,230)}\n#ph-table td.ph-ret{background:rgb(253,243,238)}\n#ph-table td.ph-sun.ph-ret{background:rgb(248,226,218)}\n#ph-table td.ph-lama{background:rgb(240,240,240)}\n' +
+      '#ph-table td{height:26px;padding:0}\n#ph-table td.ph-cv,#ph-table td.ph-num{padding:0 6px}\n#ph-table .ph-cv{text-align:left;min-width:90px}\n#ph-table .ph-num{text-align:right;font-variant-numeric:tabular-nums}\n' +
+      '#ph-table input.ph-c{width:54px;height:26px;border:0!important;border-radius:0!important;background:transparent!important;text-align:right;padding:0 5px!important;margin:0!important;font-size:12px;color:var(--brown);box-sizing:border-box;box-shadow:none!important}\n' +
+      '#ph-table input.ph-c:focus{outline:2px solid var(--amber);outline-offset:-2px;background:rgb(255,249,230)!important}\n' +
+      '#ph-table input.ph-c.ph-dirty{background:rgb(255,243,205)!important}\n' +
+      '#ph-table tfoot td{position:sticky;bottom:0;z-index:3;background:var(--wheat);font-weight:700;text-align:right;padding:0 5px}\n' +
+      '#ph-table tfoot .ph-s1,#ph-table tfoot .ph-s2{z-index:5}\n' +
+      '#ph-table .ph-tq,#ph-table .ph-tr,#ph-table .ph-tn{font-weight:700}\n' +
+      '.ph-warn{color:var(--amber);font-weight:700}\n.ph-st-ok{color:var(--teal);font-weight:700}\n.ph-st-warn{color:var(--amber);font-weight:700}\n.ph-st-err{color:var(--red);font-weight:700}\n';
+    var st = document.createElement('style'); st.id = 'ph-style'; st.textContent = css; document.head.appendChild(st);
+
+    // ---------- sambung ke kode lama (dilakukan paling akhir) ----------
+    var renderAllPrev = renderAll;
+    renderAll = function () {
+      if (activeTab !== 'packingtabel') return renderAllPrev.apply(this, arguments);
+      renderNav();
+      var main = $('main'), p = per();
+      var scroll = null, w = $('ph-wrap');
+      if (w && S.view && S.view.per === p) scroll = { l: w.scrollLeft, t: w.scrollTop };
+      if (S.loadedPer !== p) {
+        main.innerHTML = '<div class="card"><h2>Packing Harian</h2><div class="sub">Memuat data ' + NAMA_BULAN[S.bulan - 1] + ' ' + S.tahun + '…</div></div>';
+        if (S.memuatPer !== p) {
+          S.memuatPer = p;
+          muatSemua().then(function (ok) {
+            if (S.memuatPer === p) S.memuatPer = null;
+            if (ok && activeTab === 'packingtabel') renderAll();
+          }).catch(function (e) {
+            if (S.memuatPer === p) S.memuatPer = null;
+            console.error(e);
+            if (activeTab !== 'packingtabel' || per() !== p) return;
+            main.innerHTML = '<div class="card"><h2 style="color:var(--red)">Gagal memuat Packing Harian</h2><div class="note" style="font-size:13px;">' + esc(e && e.message || e) + '</div><div style="margin-top:8px;"><button class="primary" type="button" id="ph-retry">Coba lagi</button></div></div>';
+            var rb = $('ph-retry'); if (rb) rb.onclick = function () { renderAll(); };
+          });
+        }
+        return;
+      }
+      try {
+        main.innerHTML = viewHtml();
+        pasang();
+        var w2 = $('ph-wrap');
+        if (scroll && w2) { w2.scrollLeft = scroll.l; w2.scrollTop = scroll.t; }
+        if (Date.now() - S.loadedAt > 20000 && S.memuatPer !== p) {   // data sudah lama: segarkan di latar belakang
+          S.memuatPer = p;
+          muatSemua().then(function (ok) { if (S.memuatPer === p) S.memuatPer = null; if (ok) segarkanTampilan(); }).catch(function () { if (S.memuatPer === p) S.memuatPer = null; });
+        }
+      } catch (e) {
+        console.error('Gagal menampilkan Packing Harian', e);
+        main.innerHTML = '<div class="card"><h2 style="color:var(--red)">Error pada tab Packing Tabel</h2><div class="note" style="font-size:13px;">Pesan: <b>' + esc(e && e.message || e) + '</b></div></div>';
+      }
+    };
+
+    var loadAllPrev = loadAll;
+    loadAll = async function () {
+      var r = await loadAllPrev.apply(this, arguments);
+      S.lastLoadAt = Date.now();
+      if (activeTab === 'packingtabel' && S.loadedPer === per() && S.memuatPer !== per()) {
+        try { if (await muatSemua()) segarkanTampilan(); } catch (e) { console.warn('segarkan packing harian gagal', e); }
+      }
+      return r;
+    };
+
+    // simpan segera bila tab disembunyikan / koneksi kembali; peringatkan bila ada yang belum tersimpan
+    document.addEventListener('visibilitychange', function () { if (document.hidden && jumlahPending()) flush(); });
+    window.addEventListener('pagehide', function () { if (jumlahPending()) flush(); });
+    window.addEventListener('online', function () { if (jumlahPending()) flush(); });
+    window.addEventListener('beforeunload', function (e) { if (jumlahPending()) { e.preventDefault(); e.returnValue = ''; } });
+
+    if (activeTab === 'packingtabel') renderAll();
+  }
+})();
+</script>
