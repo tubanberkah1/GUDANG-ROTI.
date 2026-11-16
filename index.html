@@ -7969,3 +7969,229 @@ loadAll().then(function () { updateDbStatusBadge(); renderAll(); });
   console.info('Patch performa aktif');
 })();
 </script>
+<script>
+// =====================================================================
+// KARDUS KELUAR — (1) HAPUS AMAN  (2) KARDUS OTOMATIS DARI PACKING TABEL
+// =====================================================================
+(function () {
+  'use strict';
+  var ID_ATURAN = 'kardus_aturan';
+
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function num(n) { return (Number(n) || 0).toLocaleString('id-ID', { maximumFractionDigits: 2 }); }
+  function pad2(n) { return String(n).padStart(2, '0'); }
+
+  // 1. HAPUS AMAN: kalau Supabase menolak hapus diam-diam, baris ditandai "dihapus" dan disembunyikan.
+  var _loadAsli = loadAll;
+  loadAll = async function () {
+    var r = await _loadAsli.apply(this, arguments);
+    try {
+      var tanda = trx.filter(function (t) { return t && t.dihapus; });
+      if (tanda.length) {
+        trx = trx.filter(function (t) { return !(t && t.dihapus); });
+        tanda.forEach(function (t) { if (lastSynced.trx) lastSynced.trx.delete(t.id); });
+      }
+    } catch (e) { console.warn(e); }
+    return r;
+  };
+
+  async function hapusTrxAman(id) {
+    var t = trx.find(function (x) { return x.id === id; });
+    if (!t) return;
+    var salinan = JSON.parse(JSON.stringify(t));
+    trx = trx.filter(function (x) { return x.id !== id; });
+    await save('trx', trx);
+    var masihAda = false;
+    try {
+      var r = await sb.from('trx').select('id').eq('id', id);
+      if (!r.error && r.data && r.data.length) masihAda = true;
+    } catch (e) {}
+    if (masihAda) {
+      salinan.dihapus = true; salinan.dihapusPada = new Date().toISOString();
+      var u = await sb.from('trx').upsert([{ id: id, data: salinan }], { onConflict: 'id' });
+      if (u.error) throw u.error;
+      if (lastSynced.trx) lastSynced.trx.delete(id);
+    }
+  }
+
+  var sibukHapus = false;
+  document.addEventListener('click', function (ev) {
+    var b = ev.target && ev.target.closest ? ev.target.closest('[data-kk-del]') : null;
+    if (!b) return;
+    ev.stopImmediatePropagation(); ev.preventDefault();
+    hapusDenganKonfirmasi(b.getAttribute('data-kk-del'));
+  }, true);
+
+  async function hapusDenganKonfirmasi(id) {
+    if (sibukHapus) return;
+    var t = trx.find(function (x) { return x.id === id; }); if (!t) return;
+    var it = itemById(t.itemId);
+    if (!confirm('Hapus catatan kardus keluar ini?\n\n' + (it ? it.nama : '-') + ': ' + num(t.qty) + ' tanggal ' + t.tanggal + '\n\nStok kardus dikembalikan sejumlah itu.')) return;
+    sibukHapus = true;
+    try {
+      await hapusTrxAman(id);
+      riwayatEdit.push({ id: uid(), waktu: new Date().toISOString(), dataset: 'trx', refId: id,
+        labelData: 'Kardus Keluar — ' + (it ? it.nama : '') + ' (DIHAPUS)',
+        perubahan: ['DIHAPUS: ' + num(t.qty) + ' ' + (it ? it.satuan : '') + ', tanggal ' + t.tanggal] });
+      await save('riwayatEdit', riwayatEdit);
+    } catch (e) {
+      console.error(e); alert('Gagal menghapus. Cek internet lalu klik Refresh.');
+      try { await loadAll(); } catch (x) {}
+    } finally { sibukHapus = false; }
+    renderAll();
+  }
+
+  // 2. KARDUS OTOMATIS DARI PACKING TABEL
+  var P = { tgl: today(), rows: null, memuat: false, pesan: '' };
+
+  var ATURAN = { id: ID_ATURAN, map: {} };
+  function aturan() { return ATURAN; }
+  async function muatAturan() {
+    try {
+      var r = await sb.from('pengaturan_cv').select('data').eq('id', ID_ATURAN).maybeSingle();
+      if (!r.error && r.data && r.data.data) ATURAN = r.data.data;
+    } catch (e) { console.warn('Aturan kardus gagal dimuat', e); }
+  }
+  function daftarKardus() {
+    return items.filter(function (i) { return i.kategori === 'kardus'; })
+      .sort(function (a, b) { return String(a.kode).localeCompare(String(b.kode)); });
+  }
+
+  async function muatPacking() {
+    P.memuat = true; P.pesan = ''; tampil();
+    try {
+      var per = P.tgl.slice(0, 7), d = parseInt(P.tgl.slice(8, 10), 10);
+      await muatAturan();
+      var r = await sb.from('packing_harian').select('data').like('id', per + '|%');
+      if (r.error) throw r.error;
+      P.rows = (r.data || []).map(function (x) { return x.data; }).map(function (rec) {
+        var c = rec.hari && (rec.hari[d] || rec.hari[pad2(d)]);
+        return { key: rec.key, nama: rec.nama, qty: c ? Number(c.qty) || 0 : 0 };
+      }).filter(function (x) { return x.qty > 0; })
+        .sort(function (a, b) { return String(a.nama).localeCompare(String(b.nama)); });
+    } catch (e) {
+      console.error(e); P.rows = []; P.pesan = 'Gagal memuat Packing Tabel: ' + (e.message || e);
+    }
+    P.memuat = false; tampil();
+  }
+
+  function hitung() {
+    var map = aturan().map || {}, perItem = {}, belum = [];
+    (P.rows || []).forEach(function (r) {
+      var a = map[r.key];
+      r.a = a || null; r.kardus = 0;
+      if (!a) { belum.push(r.nama); return; }
+      if (a.itemId === '-') return;
+      var isi = Number(a.isi) || 0;
+      if (!a.itemId || isi <= 0) { belum.push(r.nama); return; }
+      r.kardus = Math.ceil(r.qty / isi);
+      perItem[a.itemId] = (perItem[a.itemId] || 0) + r.kardus;
+    });
+    return { perItem: perItem, belum: belum };
+  }
+
+  function tampil() {
+    var box = document.getElementById('kp-card'); if (!box) return;
+    var h = '<h2>Kardus dari Packing Tabel (otomatis)</h2>'
+      + '<div class="sub">Pilih tanggal, atur jenis kardus dan isi per kardus sekali saja per produk, lalu klik <b>Catat</b>. Kalau diklik lagi di tanggal yang sama, angkanya diperbarui (tidak dobel).</div>'
+      + '<div class="inline" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;"><div class="field"><label>Tanggal packing</label><input type="date" id="kp-tgl" value="' + esc(P.tgl) + '"></div>'
+      + '<button type="button" class="primary" id="kp-muat">Hitung</button></div>';
+    if (P.memuat) h += '<div class="empty" style="margin-top:8px;">Memuat...</div>';
+    else if (P.rows) {
+      var hs = hitung(), kardus = daftarKardus();
+      if (P.pesan) h += '<div style="color:var(--red);margin-top:8px;">' + esc(P.pesan) + '</div>';
+      if (!P.rows.length) h += '<div class="empty" style="margin-top:8px;">Tidak ada roti dipacking di Packing Tabel pada tanggal ini.</div>';
+      else {
+        h += '<div style="overflow:auto;"><table><thead><tr><th>Produk</th><th>Roti dipacking</th><th>Jenis kardus</th><th>Isi/kardus</th><th>Kardus terpakai</th></tr></thead><tbody>';
+        P.rows.forEach(function (r) {
+          var a = r.a || {};
+          var opt = '<option value="">— pilih —</option><option value="-"' + (a.itemId === '-' ? ' selected' : '') + '>Tidak pakai kardus</option>'
+            + kardus.map(function (k) { return '<option value="' + esc(k.id) + '"' + (a.itemId === k.id ? ' selected' : '') + '>' + esc(k.nama) + '</option>'; }).join('');
+          var pakai = a.itemId && a.itemId !== '-';
+          h += '<tr><td>' + esc(r.nama) + '</td><td style="text-align:right;">' + num(r.qty) + '</td>'
+            + '<td><select data-kp-item="' + esc(r.key) + '">' + opt + '</select></td>'
+            + '<td>' + (pakai ? '<input type="number" min="1" step="1" style="width:70px;" data-kp-isi="' + esc(r.key) + '" value="' + esc(a.isi || '') + '">' : '-') + '</td>'
+            + '<td style="text-align:right;font-weight:700;">' + (r.kardus ? num(r.kardus) : (pakai ? '<span style="color:var(--red)">isi?</span>' : '-')) + '</td></tr>';
+        });
+        h += '</tbody></table></div>';
+        var ring = Object.keys(hs.perItem).map(function (id) { var it = itemById(id); return esc(it ? it.nama : id) + ': <b>' + num(hs.perItem[id]) + '</b>'; });
+        h += '<div style="margin-top:8px;">' + (ring.length ? 'Total kardus: ' + ring.join(' · ') : 'Belum ada kardus terhitung.') + '</div>';
+        if (hs.belum.length) h += '<div style="color:var(--red);font-size:12px;margin-top:4px;">Belum diatur: ' + esc(hs.belum.join(', ')) + '</div>';
+        h += '<div style="margin-top:8px;"><button type="button" class="primary" id="kp-catat">Catat ke Kardus Keluar</button></div>';
+      }
+    }
+    box.innerHTML = h;
+  }
+
+  var sibuk = false;
+  async function simpanAturan(key, patch) {
+    var r = aturan(); r = JSON.parse(JSON.stringify(r)); r.map = r.map || {};
+    r.map[key] = Object.assign({}, r.map[key] || {}, patch);
+    var u = await sb.from('pengaturan_cv').upsert({ id: r.id, data: r }, { onConflict: 'id' });
+    if (u.error) { alert('Gagal menyimpan pengaturan kardus: ' + u.error.message); return; }
+    ATURAN = r;
+    tampil();
+  }
+
+  async function catat() {
+    if (sibuk) return;
+    var hs = hitung();
+    if (hs.belum.length) { alert('Atur dulu jenis kardus dan isi per kardus untuk:\n\n' + hs.belum.join('\n')); return; }
+    var awalan = 'kkauto-' + P.tgl + '-';
+    var salah = [];
+    Object.keys(hs.perItem).forEach(function (id) {
+      var ada = trx.find(function (x) { return x.id === awalan + id; });
+      var sisa = stokItem(id).sisa + (ada ? ada.qty || 0 : 0);
+      if (hs.perItem[id] > sisa + 1e-9) { var it = itemById(id); salah.push((it ? it.nama : id) + ': butuh ' + num(hs.perItem[id]) + ', stok ' + num(sisa)); }
+    });
+    if (salah.length) { alert('Stok kardus tidak cukup. DIBATALKAN:\n\n' + salah.join('\n')); return; }
+    sibuk = true;
+    try {
+      Object.keys(hs.perItem).forEach(function (id) {
+        var rid = awalan + id, t = trx.find(function (x) { return x.id === rid; });
+        if (t) t.qty = hs.perItem[id];
+        else trx.push({ id: rid, tanggal: P.tgl, itemId: id, tipe: 'keluar', qty: hs.perItem[id], supplier: '',
+          ket: 'Kardus Keluar: Otomatis dari Packing Tabel', ketKK: 'Otomatis dari Packing Tabel',
+          sumber: 'kardus_keluar', grupId: 'kkauto-' + P.tgl, autoPacking: true });
+      });
+      await save('trx', trx);
+      var usang = trx.filter(function (x) { return x.id.indexOf(awalan) === 0 && !hs.perItem[x.itemId]; });
+      for (var i = 0; i < usang.length; i++) await hapusTrxAman(usang[i].id);
+      P.pesan = '';
+      alert('Tercatat di Kardus Keluar untuk ' + P.tgl + '.');
+    } catch (e) { console.error(e); alert('Gagal mencatat. Cek internet lalu klik Refresh.'); }
+    finally { sibuk = false; }
+    renderAll();
+  }
+
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (t && t.id === 'kp-muat') muatPacking();
+    else if (t && t.id === 'kp-catat') catat();
+  });
+  document.addEventListener('change', function (ev) {
+    var t = ev.target; if (!t || !t.closest || !t.closest('#kp-card')) return;
+    if (t.id === 'kp-tgl') { P.tgl = t.value || today(); P.rows = null; muatPacking(); }
+    else if (t.hasAttribute('data-kp-item')) {
+      var v = t.value; simpanAturan(t.getAttribute('data-kp-item'), { itemId: v, isi: v === '-' ? 0 : (((aturan().map || {})[t.getAttribute('data-kp-item')] || {}).isi || '') });
+    } else if (t.hasAttribute('data-kp-isi')) simpanAturan(t.getAttribute('data-kp-isi'), { isi: parseFloat(t.value) || 0 });
+  });
+
+  var _ra = renderAll;
+  renderAll = function () {
+    _ra.apply(this, arguments);
+    try {
+      if (activeTab !== 'packing') return;
+      var main = document.getElementById('main');
+      if (!main || document.getElementById('kp-card')) return;
+      var div = document.createElement('div'); div.className = 'card'; div.id = 'kp-card';
+      var first = main.firstElementChild;
+      if (first && first.nextSibling) main.insertBefore(div, first.nextSibling); else main.appendChild(div);
+      tampil();
+      if (P.rows === null && !P.memuat) muatPacking();
+    } catch (e) { console.warn('Kartu kardus otomatis gagal dipasang', e); }
+  };
+
+  console.info('Patch Kardus Keluar aktif');
+})();
+</script>
